@@ -258,21 +258,21 @@ class Executor(object):
 
 # RN50, InceptionV3, MobilenetV1, VGG16, Mobilenetv3-ssd, DeepLabv3-mobilenetv2
 if __name__ == "__main__":
-    test_runner = Executor(use_tracker="android")
     #test_runner = Executor()
-    test_runner.test_resnet50_ingestion(target="opencl --device=mali")
-    #test_runner.test_inceptionv3_ingestion(target="opencl --device=mali")
-    #test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali")
-    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali")
-    #test_runner.test_mobilenetv1_ingestion(target="opencl")
-    #test_runner.test_mobilenetv1_ingestion(target="llvm")
-    #test_runner.test_vgg16_ingestion(target="opencl --device=mali")
+    test_runner = Executor(use_tracker="android")
 
-    #test_inceptionv3_ingestion()
-    #test_mobilenetv1_ingestion()
-    #test_vgg16_ingestion()
-    #test_mobilenetv3_ssdlite_ingestion()
-    #test_deeplabv3_ingestion()
+    # Successful
+    #test_runner.test_resnet50_ingestion(target="opencl --device=mali") # 0.373638 secs/iteration
+    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali") # 0.0861629 secs/iteration
+
+    # Unsuccessful
+    test_runner.test_inceptionv3_ingestion(target="opencl --device=mali")
+    #test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali")
+    #test_runner.test_vgg16_ingestion(target="opencl --device=mali") # Fails in _LIB.TVMArrayCopyFromTo : TVMError: Socket SockChannel::Send Error:Broken pipe
+    #test_runner.test_mobilenetv3_ssdlite_ingestion() # ingestion error: null argument to op.where
+    #test_runner.test_deeplabv3_ingestion() # ingestion error: op.subtract takes two args not three
+
+    # Untested
 
     #bench_conv2d_keras()
     tuning_option = {
