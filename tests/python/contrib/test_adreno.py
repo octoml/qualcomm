@@ -54,7 +54,7 @@ def benchmark(tvm_mod, params, input_shape, target='llvm', target_host="llvm", r
         graph, lib, params = relay.build(tvm_mod, target_host=target_host, target=target, params=params)
         #lib.save("./host.ll")
         #lib.imported_modules[0].save("./device.cl")
-    test_data = np.random.normal(size=input_shape).astype('float32')
+
     if remote:
         print('Using Android OpenCL runtime over RPC')
         temp = util.tempdir()
@@ -73,7 +73,12 @@ def benchmark(tvm_mod, params, input_shape, target='llvm', target_host="llvm", r
         print('Using local runtime')
         ctx = tvm.context(target, 0)
         m = graph_runtime.create(graph, lib, ctx)
-    m.set_input('data', test_data)
+    if isinstance(input_shape, dict):
+        key = list(input_shape)[0]
+        input_shape = input_shape[key]
+    else:
+        key = 'data'
+    m.set_input(key, np.random.normal(size=input_shape).astype('float32'))
     m.set_input(**params)
     print("Evaluating...")
     time_f = m.module.time_evaluator("run", ctx, number=10)
@@ -147,8 +152,15 @@ class Executor(object):
         #mod, params = relay.frontend.from_tensorflow(graph_def)
         mod, params = relay.frontend.from_tensorflow(graph_def, shape={"ImageTensor": (1,320,320,3)})
 
+    def test_inceptionv3_tf_ingestion(self, target="llvm"):
+        graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/inception_v3_2016_08_28_frozen_opt.pb"))
+        #tf.train.write_graph(graph_def, "./",name="inceptionv3.pbtxt")
+        graph_def = tf_importer.ProcessGraphDefParam(graph_def)
+        input_shape = {"input": (1,299,299,3)}
+        #mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape)
+        mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
+        benchmark(mod, params, input_shape, target=target, target_host=self.host_target, remote=self.remote)
 
-        import tensorflow as tf
 
     def bench_conv2d_keras(self):
         # keras_model = tf.keras.Sequential()
@@ -244,13 +256,14 @@ class Executor(object):
                                autotvm.callback.log_to_file(log_filename)])
 
 
-
+# RN50, InceptionV3, MobilenetV1, VGG16, Mobilenetv3-ssd, DeepLabv3-mobilenetv2
 if __name__ == "__main__":
     test_runner = Executor(use_tracker="android")
     #test_runner = Executor()
-    #test_runner.test_resnet50_ingestion(target="opencl --device=mali")
+    test_runner.test_resnet50_ingestion(target="opencl --device=mali")
     #test_runner.test_inceptionv3_ingestion(target="opencl --device=mali")
-    test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali")
+    #test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali")
+    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali")
     #test_runner.test_mobilenetv1_ingestion(target="opencl")
     #test_runner.test_mobilenetv1_ingestion(target="llvm")
     #test_runner.test_vgg16_ingestion(target="opencl --device=mali")
