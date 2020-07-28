@@ -216,12 +216,12 @@ class Executor(object):
         self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
     def test_mobilenetv1_tf_ingestion(self, target="llvm"):
-        graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/mobilenet-v1_1548916615.pb"))
-        #tf.train.write_graph(graph_def, "./",name="inceptionv3.pbtxt")
+        graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ssd_mobilenet_v1_coco.pb"))
+        #tf.train.write_graph(graph_def, "./",name="ssd-mobilenetv1-coco.pbtxt")
         graph_def = tf_importer.ProcessGraphDefParam(graph_def)
-        input_shape = {"input": (1,224,224,3)}
-        mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape)
-        #mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
+        input_shape = {"image_tensor": (1,224,224,3)}
+        #mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape)
+        mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
         self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
     def bench_conv2d_keras(self):
@@ -372,19 +372,19 @@ if __name__ == "__main__":
 
     # Successful
     #test_runner.test_resnet50_ingestion(target="opencl --device=mali") # 0.373638 secs/iteration
-    test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali") # 0.0861629 secs/iteration
+    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali") # 0.0861629 secs/iteration
     #test_runner.tune_pending_benchmarks()
-    test_runner.run_pending_benchmarks()
+    #test_runner.run_pending_benchmarks()
 
     # Unsuccessful
     #test_runner.test_inceptionv3_ingestion(target="opencl --device=mali")
     #test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali")
     #test_runner.test_vgg16_ingestion(target="opencl --device=mali") # OOM error mrpc:RPCProces: Throwing OutOfMemoryError "Failed to allocate a 411041848 byte allocation with 4969365 free bytes and 251MB until OOM, target footprint 9938733, growth limit 268435456" (VmSize 6622184 kB)
-    #test_runner.test_mobilenetv3_ssdlite_ingestion() # ingestion error: null argument to op.where
-    #test_runner.test_deeplabv3_ingestion() # ingestion error: op.subtract takes two args not three
+    #test_runner.test_mobilenetv3_ssdlite_ingestion() # Ingestion error: null argument to op.where
+    #test_runner.test_deeplabv3_ingestion() # Ingestion error: op.subtract takes two args not three
+    #test_runner.test_mobilenetv1_tf_ingestion(target="opencl --device=mali") #  Ingestion error: File "/Users/csullivan/Projects/incubator-tvm/src/relay/transforms/fold_scale_axis.cc", line 246 # TVMError: FoldScaleAxis only accept dataflow-form
 
     # Untested
-    #test_runner.test_mobilenetv1_tf_ingestion(target="opencl --device=mali")
 
 
 
