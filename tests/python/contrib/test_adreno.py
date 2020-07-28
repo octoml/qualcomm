@@ -32,10 +32,22 @@ import tvm.relay.testing.tf as tf_importer
 from tvm import autotvm
 from tvm.autotvm.tuner import XGBTuner
 
-
 #from tvm.contrib.debugger import debug_runtime
 from tvm.contrib import graph_runtime
 from tvm.contrib import util, ndk
+
+device_key = "android"
+tracker_host = os.environ["TVM_TRACKER_HOST"]
+tracker_port = int(os.environ["TVM_TRACKER_PORT"])
+
+tuning_options = {
+    'log_filename': "autotvm_tuning.log",
+    'early_stopping': None,
+    'measure_option': autotvm.measure_option(
+        builder=autotvm.LocalBuilder(build_func='ndk'),
+        runner=autotvm.RPCRunner(device_key, host=tracker_host, port=tracker_port, number=5, timeout=100),
+    ),
+}
 
 def get_network(name, batch_size=None, is_gluon_model=True):
     if is_gluon_model:
@@ -49,88 +61,130 @@ def get_network(name, batch_size=None, is_gluon_model=True):
 
     return model, data_shape
 
-def benchmark(tvm_mod, params, input_shape, target='llvm', target_host="llvm", remote=None):
-    with relay.build_config(opt_level=3):
-        graph, lib, params = relay.build(tvm_mod, target_host=target_host, target=target, params=params)
-        #lib.save("./host.ll")
-        #lib.imported_modules[0].save("./device.cl")
-
-    if remote:
-        print('Using Android OpenCL runtime over RPC')
-        temp = util.tempdir()
-        dso_binary = "dev_lib_cl.so"
-        dso_binary_path = temp.relpath(dso_binary)
-        if "opencl" in target:
-            ctx = remote.cl(0)
-        else:
-            ctx = remote.cpu(0)
-        lib.export_library(dso_binary_path, ndk.create_shared)
-        remote.upload(dso_binary_path)
-        print("Uploading binary...")
-        rlib = remote.load_module(dso_binary)
-        m = graph_runtime.create(graph, rlib, ctx)
-    else:
-        print('Using local runtime')
-        ctx = tvm.context(target, 0)
-        m = graph_runtime.create(graph, lib, ctx)
-    if isinstance(input_shape, dict):
-        key = list(input_shape)[0]
-        input_shape = input_shape[key]
-    else:
-        key = 'data'
-    m.set_input(key, np.random.normal(size=input_shape).astype('float32'))
-    m.set_input(**params)
-    print("Evaluating...")
-    time_f = m.module.time_evaluator("run", ctx, number=10)
-    cost = time_f().mean
-    #prof_res = np.array(time_f().results) * 1000  # milliseconds
-    #print("%-20s %-19s (%s)" % (network, "%.2f ms" % np.mean(prof_res), "%.2f ms" % np.std(prof_res)))
-    print('%g secs/iteration\n' % cost)
-
 class Executor(object):
     def __init__(self, use_tracker=False):
+        self.benchmarks = []
+        self.tuning_jobs = []
         self.tracker = None
         self.remote = None
         self.host_target = "llvm"
+        self.use_tracker = use_tracker
         if use_tracker == "android":
-            from tvm import rpc
-            key = "android"
-            tracker_host = os.environ["TVM_TRACKER_HOST"]
-            tracker_port = int(os.environ["TVM_TRACKER_PORT"])
-            print("Tracker attempting connection on {}:{}".format(tracker_host, tracker_port))
-            self.tracker = rpc.connect_tracker(tracker_host, tracker_port)
-            self.remote = self.tracker.request(key, priority=0,session_timeout=60)
-            print("Tracker connected to remote RPC server")
             self.host_target = "llvm -mtriple=arm64-linux-android"
         elif use_tracker != False:
             class BackendNotImplementedForRPCBenchmarking(Exception):
                 pass
             raise BackendNotImplementedForRPCBenchmarking
+    def connect_tracker(self):
+        from tvm import rpc
+        print("Tracker attempting connection on {}:{}".format(tracker_host, tracker_port))
+        self.tracker = rpc.connect_tracker(tracker_host, tracker_port)
+        self.remote = self.tracker.request(device_key, priority=0,session_timeout=60)
+        print("Tracker connected to remote RPC server")
+
+    def disconnect_tracker(self):
+        self.remote = None
+        self.tracker = None
+
+    def run_pending_benchmarks(self):
+        for bench in self.benchmarks:
+            bench()
+
+    def tune_pending_benchmarks(self):
+        for tune in self.tuning_jobs:
+            tune()
+
+    def benchmark(self,tvm_mod, params, input_shape, target='llvm', target_host="llvm"):
+        if self.use_tracker and self.remote == None:
+            self.connect_tracker()
+
+        with relay.build_config(opt_level=3):
+            graph, lib, params = relay.build(tvm_mod, target_host=target_host, target=target, params=params)
+            #lib.save("./host.ll")
+            #lib.imported_modules[0].save("./device.cl")
+
+        if self.remote:
+            print('Using Android OpenCL runtime over RPC')
+            temp = util.tempdir()
+            dso_binary = "dev_lib_cl.so"
+            dso_binary_path = temp.relpath(dso_binary)
+            if "opencl" in target:
+                ctx = self.remote.cl(0)
+            else:
+                ctx = self.remote.cpu(0)
+            lib.export_library(dso_binary_path, ndk.create_shared)
+            self.remote.upload(dso_binary_path)
+            print("Uploading binary...")
+            rlib = self.remote.load_module(dso_binary)
+            m = graph_runtime.create(graph, rlib, ctx)
+        else:
+            print('Using local runtime')
+            ctx = tvm.context(target, 0)
+            m = graph_runtime.create(graph, lib, ctx)
+        if isinstance(input_shape, dict):
+            key = list(input_shape)[0]
+            input_shape = input_shape[key]
+        else:
+            key = 'data'
+        m.set_input(key, np.random.normal(size=input_shape).astype('float32'))
+        m.set_input(**params)
+        print("Evaluating...")
+        time_f = m.module.time_evaluator("run", ctx, number=10)
+        cost = time_f().mean
+        #prof_res = np.array(time_f().results) * 1000  # milliseconds
+        #print("%-20s %-19s (%s)" % (network, "%.2f ms" % np.mean(prof_res), "%.2f ms" % np.std(prof_res)))
+        print('%g secs/iteration\n' % cost)
+        if self.remote:
+            self.disconnect_tracker()
+
 
     def test_resnet50_ingestion(self, target="llvm"):
         gluon_model, input_shape = get_network("resnet50_v1", batch_size=1)
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
-        benchmark(mod, params, input_shape, target=target, target_host=self.host_target, remote=self.remote)
+        self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
     def test_inceptionv3_ingestion(self, target="llvm"):
         gluon_model, input_shape = get_network("inceptionv3", batch_size=1)
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
-        benchmark(mod, params, input_shape, target=target, target_host=self.host_target, remote=self.remote)
+        self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
     def test_mobilenetv1_ingestion(self, target="llvm"):
         gluon_model, input_shape = get_network("mobilenet1.0", batch_size=1)
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
-        benchmark(mod, params, input_shape, target=target, target_host=self.host_target, remote=self.remote)
+        def bench():
+            self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
+        benchmark_index = len(self.benchmarks)
+        self.benchmarks.append(bench)
+        def tune():
+            print("Extracting tasks")
+            tasks = autotvm.task.extract_from_program(mod["main"], target=target, params=params)
+            print("Tuning kernels")
+
+
+            #self._tune_kernels(tasks, **tuning_options)
+            tune_tasks(tasks, **tuning_options)
+
+            print ("Apply best performing tuning profiles:")
+            for i,task in enumerate(tasks):
+                dispatch_context = autotvm.apply_history_best(tuning_options["log_filename"])
+                best_config = dispatch_context.query(task.target, task.workload)
+                print("task", i, best_config)
+            def tuned_benchmark():
+                with autotvm.apply_history_best(tuning_options["log_filename"]):
+                    benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
+            self.benchmarks.pop(benchmark_index)
+            self.benchmarks.append(tuned_benchmark)
+        self.tuning_jobs.append(tune)
 
     def test_vgg16_ingestion(self, target="llvm"):
         gluon_model, input_shape = get_network("vgg16", batch_size=1)
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
-        benchmark(mod, params, input_shape, target=target, target_host=self.host_target, remote=self.remote)
+        self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
     def test_vgg16bn_ingestion(self, target="llvm"):
         gluon_model, input_shape = get_network("vgg16_bn", batch_size=1)
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
-        benchmark(mod, params, input_shape, target=target, target_host=self.host_target, remote=self.remote)
+        self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
     def test_mobilenetv3_ssdlite_ingestion(self, check = False):
         # TF pretrained model ssd_mobilenet_v3_small_coco
@@ -159,8 +213,16 @@ class Executor(object):
         input_shape = {"input": (1,299,299,3)}
         #mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape)
         mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
-        benchmark(mod, params, input_shape, target=target, target_host=self.host_target, remote=self.remote)
+        self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
+    def test_mobilenetv1_tf_ingestion(self, target="llvm"):
+        graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/mobilenet-v1_1548916615.pb"))
+        #tf.train.write_graph(graph_def, "./",name="inceptionv3.pbtxt")
+        graph_def = tf_importer.ProcessGraphDefParam(graph_def)
+        input_shape = {"input": (1,224,224,3)}
+        mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape)
+        #mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
+        self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
     def bench_conv2d_keras(self):
         # keras_model = tf.keras.Sequential()
@@ -217,7 +279,7 @@ class Executor(object):
                                                          layout=layout,
                                                          shape={"data" : input.shape})
             if tune is None:
-                benchmark(mod, params, input.shape, target=target)
+                self.benchmark(mod, params, input.shape, target=target)
                 return
 
             tasks = autotvm.task.extract_from_program(mod["main"], target=target,
@@ -231,7 +293,7 @@ class Executor(object):
                 print("\nBest config:")
                 print(best_config)
             with autotvm.apply_history_best('autotvm_tuning.log'):
-                benchmark(mod, params, input.shape, target=target)
+                self.benchmark(mod, params, input.shape, target=target)
 
 
     # Function for running a tuning jobs across tunable tasks
@@ -255,6 +317,53 @@ class Executor(object):
                                autotvm.callback.progress_bar(n_trial, prefix=prefix),
                                autotvm.callback.log_to_file(log_filename)])
 
+def tune_tasks(tasks,
+               measure_option,
+               tuner='xgb',
+               n_trial=1000,
+               early_stopping=None,
+               log_filename='tuning.log',
+               use_transfer_learning=True):
+    # create tmp log file
+    tmp_log_file = log_filename + ".tmp"
+    if os.path.exists(tmp_log_file):
+        os.remove(tmp_log_file)
+
+    for i, tsk in enumerate(reversed(tasks)):
+        prefix = "[Task %2d/%2d] " % (i+1, len(tasks))
+
+        # create tuner
+        if tuner == 'xgb' or tuner == 'xgb-rank':
+            tuner_obj = XGBTuner(tsk, loss_type='rank')
+        elif tuner == 'xgb_knob':
+            tuner_obj = XGBTuner(tsk, loss_type='rank', feature_type='knob')
+        elif tuner == 'ga':
+            tuner_obj = GATuner(tsk, pop_size=50)
+        elif tuner == 'random':
+            tuner_obj = RandomTuner(tsk)
+        elif tuner == 'gridsearch':
+            tuner_obj = GridSearchTuner(tsk)
+        else:
+            raise ValueError("Invalid tuner: " + tuner)
+
+        if use_transfer_learning:
+            if os.path.isfile(tmp_log_file):
+                tuner_obj.load_history(autotvm.record.load_from_file(tmp_log_file))
+
+        # do tuning
+        tsk_trial = min(n_trial, len(tsk.config_space))
+        tuner_obj.tune(n_trial=tsk_trial,
+                       early_stopping=early_stopping,
+                       measure_option=measure_option,
+                       callbacks=[
+                           autotvm.callback.progress_bar(tsk_trial, prefix=prefix),
+                           autotvm.callback.log_to_file(tmp_log_file)
+                       ])
+
+    # pick best records to a cache file
+    autotvm.record.pick_best(tmp_log_file, log_filename)
+    os.remove(tmp_log_file)
+
 
 # RN50, InceptionV3, MobilenetV1, VGG16, Mobilenetv3-ssd, DeepLabv3-mobilenetv2
 if __name__ == "__main__":
@@ -263,29 +372,23 @@ if __name__ == "__main__":
 
     # Successful
     #test_runner.test_resnet50_ingestion(target="opencl --device=mali") # 0.373638 secs/iteration
-    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali") # 0.0861629 secs/iteration
+    test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali") # 0.0861629 secs/iteration
+    #test_runner.tune_pending_benchmarks()
+    test_runner.run_pending_benchmarks()
 
     # Unsuccessful
-    test_runner.test_inceptionv3_ingestion(target="opencl --device=mali")
+    #test_runner.test_inceptionv3_ingestion(target="opencl --device=mali")
     #test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali")
-    #test_runner.test_vgg16_ingestion(target="opencl --device=mali") # Fails in _LIB.TVMArrayCopyFromTo : TVMError: Socket SockChannel::Send Error:Broken pipe
+    #test_runner.test_vgg16_ingestion(target="opencl --device=mali") # OOM error mrpc:RPCProces: Throwing OutOfMemoryError "Failed to allocate a 411041848 byte allocation with 4969365 free bytes and 251MB until OOM, target footprint 9938733, growth limit 268435456" (VmSize 6622184 kB)
     #test_runner.test_mobilenetv3_ssdlite_ingestion() # ingestion error: null argument to op.where
     #test_runner.test_deeplabv3_ingestion() # ingestion error: op.subtract takes two args not three
 
     # Untested
+    #test_runner.test_mobilenetv1_tf_ingestion(target="opencl --device=mali")
+
+
 
     #bench_conv2d_keras()
-    tuning_option = {
-        'log_filename': "autotvm_tuning.log",
-        'early_stopping': None,
-
-        'measure_option': autotvm.measure_option(
-            builder=autotvm.LocalBuilder(),
-            runner=autotvm.LocalRunner(number=3, repeat=1,
-                                       min_repeat_ms=10),
-        ),
-    }
-
     #bench_conv2d_tf(layout="NCHW", target="opencl --device=mali", filter_size=1)
     #bench_conv2d_tf(layout="NCHW", target="opencl --device=mali", filter_size=1, tune=["nn.conv2d"], tuning_opt=tuning_option)
 
