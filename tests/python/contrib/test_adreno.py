@@ -90,9 +90,9 @@ class Executor(object):
         for bench in self.benchmarks:
             bench()
 
-    def tune_pending_benchmarks(self):
+    def tune_pending_benchmarks(self, apply_previous_tune=False):
         for tune in self.tuning_jobs:
-            tune()
+            tune(apply_previous_tune)
 
     def benchmark(self,tvm_mod, params, input_shape, target='llvm', target_host="llvm"):
         if self.use_tracker and self.remote == None:
@@ -155,14 +155,12 @@ class Executor(object):
             self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
         benchmark_index = len(self.benchmarks)
         self.benchmarks.append(bench)
-        def tune():
+        def tune(apply_previous_tune=False):
             print("Extracting tasks")
             tasks = autotvm.task.extract_from_program(mod["main"], target=target, target_host=self.host_target, params=params)
-            print("Tuning kernels")
-
-
-            #self._tune_kernels(tasks, **tuning_options)
-            tune_tasks(tasks, **tuning_options)
+            if apply_previous_tune == False:
+                print("Tuning kernels")
+                tune_tasks(tasks, **tuning_options)
 
             print ("Apply best performing tuning profiles:")
             for i,task in enumerate(tasks):
@@ -171,7 +169,7 @@ class Executor(object):
                 print("task", i, best_config)
             def tuned_benchmark():
                 with autotvm.apply_history_best(tuning_options["log_filename"]):
-                    benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
+                    self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
             self.benchmarks.pop(benchmark_index)
             self.benchmarks.append(tuned_benchmark)
         self.tuning_jobs.append(tune)
@@ -393,5 +391,6 @@ if __name__ == "__main__":
 
     # Tuning
     test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali")
+    #test_runner.tune_pending_benchmarks(apply_previous_tune=True)
     test_runner.tune_pending_benchmarks()
-    #test_runner.run_pending_benchmarks()
+    test_runner.run_pending_benchmarks()
