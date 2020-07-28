@@ -44,7 +44,7 @@ tuning_options = {
     'log_filename': "autotvm_tuning.log",
     'early_stopping': None,
     'measure_option': autotvm.measure_option(
-        builder=autotvm.LocalBuilder(build_func='ndk'),
+        builder=autotvm.LocalBuilder(build_func=ndk.create_shared),
         runner=autotvm.RPCRunner(device_key, host=tracker_host, port=tracker_port, number=5, timeout=100),
     ),
 }
@@ -157,7 +157,7 @@ class Executor(object):
         self.benchmarks.append(bench)
         def tune():
             print("Extracting tasks")
-            tasks = autotvm.task.extract_from_program(mod["main"], target=target, params=params)
+            tasks = autotvm.task.extract_from_program(mod["main"], target=target, target_host=self.host_target, params=params)
             print("Tuning kernels")
 
 
@@ -282,9 +282,11 @@ class Executor(object):
                 self.benchmark(mod, params, input.shape, target=target)
                 return
 
-            tasks = autotvm.task.extract_from_program(mod["main"], target=target,
-                                                  params=params,
-                                                  ops=(relay.op.get(op) for op in tune))
+            tasks = autotvm.task.extract_from_program(mod["main"],
+                                                      target=target,
+                                                      target_host=self.host_target,
+                                                      params=params,
+                                                      ops=(relay.op.get(op) for op in tune))
             self._tune_kernels(tasks, **tuning_opt)
 
             for task in tasks:
@@ -320,7 +322,7 @@ class Executor(object):
 def tune_tasks(tasks,
                measure_option,
                tuner='xgb',
-               n_trial=1000,
+               n_trial=20,
                early_stopping=None,
                log_filename='tuning.log',
                use_transfer_learning=True):
@@ -373,12 +375,13 @@ if __name__ == "__main__":
     # Successful
     #test_runner.test_resnet50_ingestion(target="opencl --device=mali") # 0.373638 secs/iteration
     #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali") # 0.0861629 secs/iteration
-    #test_runner.tune_pending_benchmarks()
-    #test_runner.run_pending_benchmarks()
+    #test_runner.test_mobilenetv1_ingestion(target="llvm")
+    #test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali") # 0.887882 secs/iteration
+    #test_runner.test_resnet50_ingestion(target="opencl --device=mali")
+    #test_runner.test_inceptionv3_tf_ingestion(target="llvm")
 
     # Unsuccessful
-    #test_runner.test_inceptionv3_ingestion(target="opencl --device=mali")
-    #test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali")
+    #test_runner.test_inceptionv3_ingestion(target="opencl --device=mali") # Broken pipe during RPC TVMArray.copyfrom/to
     #test_runner.test_vgg16_ingestion(target="opencl --device=mali") # OOM error mrpc:RPCProces: Throwing OutOfMemoryError "Failed to allocate a 411041848 byte allocation with 4969365 free bytes and 251MB until OOM, target footprint 9938733, growth limit 268435456" (VmSize 6622184 kB)
     #test_runner.test_mobilenetv3_ssdlite_ingestion() # Ingestion error: null argument to op.where
     #test_runner.test_deeplabv3_ingestion() # Ingestion error: op.subtract takes two args not three
@@ -388,10 +391,7 @@ if __name__ == "__main__":
 
 
 
-    #bench_conv2d_keras()
-    #bench_conv2d_tf(layout="NCHW", target="opencl --device=mali", filter_size=1)
-    #bench_conv2d_tf(layout="NCHW", target="opencl --device=mali", filter_size=1, tune=["nn.conv2d"], tuning_opt=tuning_option)
-
-    #bench_conv2d_tf(layout="NHWC", filter_size=1)
-    #bench_conv2d_tf(layout="NHWC", filter_size=1, tune=["nn.conv2d"], tuning_opt=tuning_option)
-    #bench_conv2d_tf(layout="NHWC", target="opencl", filter_size=1, tune=["nn.conv2d"], tuning_opt=tuning_option)
+    # Tuning
+    test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali")
+    test_runner.tune_pending_benchmarks()
+    #test_runner.run_pending_benchmarks()
