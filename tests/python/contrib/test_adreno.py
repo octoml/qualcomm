@@ -255,8 +255,8 @@ def convert_to_fp16(path_to_model, input_name, output_names, target_type='fp16',
     from google.protobuf import text_format
 
     # Const should be float32 in object detection api during nms (see here: https://www.tensorflow.org/api_docs/cc/class/tensorflow/ops/non-max-suppression-v4.html)
-    conversion_blacklist.extend(["Postprocessor/BatchMultiClassNonMaxSuppression/MultiClassNonMaxSuppression/non_max_suppression/iou_threshold",
-                                 "Postprocessor/BatchMultiClassNonMaxSuppression/MultiClassNonMaxSuppression/non_max_suppression/score_threshold"])
+    # conversion_blacklist.extend(["Postprocessor/BatchMultiClassNonMaxSuppression/MultiClassNonMaxSuppression/non_max_suppression/iou_threshold",
+    #                              "Postprocessor/BatchMultiClassNonMaxSuppression/MultiClassNonMaxSuppression/non_max_suppression/score_threshold"])
 
     def rewrite_batch_norm_node_v2(node, graph_def, target_type='fp16'):
         """
@@ -437,8 +437,8 @@ class Executor(object):
             input_shape = input_shape[key]
         else:
             key = 'data'
-        m.set_input(key, np.random.normal(size=input_shape).astype(dtype))
         m.set_input(**params)
+        m.set_input(key, np.random.normal(size=input_shape).astype(dtype))
         print("Evaluating...")
         time_f = m.module.time_evaluator("run", ctx, number=10)
         cost = time_f().mean
@@ -472,6 +472,9 @@ class Executor(object):
 
     def test_resnet50_ingestion(self, target="llvm", dtype='float32'):
         gluon_model, input_shape = get_network("resnet50_v1", batch_size=1)
+        if dtype != 'float32':
+            gluon_model.cast(dtype)
+            gluon_model.hybridize()
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
@@ -483,8 +486,11 @@ class Executor(object):
         mod, params = relay.frontend.from_keras(model, input_shape)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_inceptionv3_ingestion(self, target="llvm"):
+    def test_inceptionv3_ingestion(self, target="llvm", dtype='float32'):
         gluon_model, input_shape = get_network("inceptionv3", batch_size=1)
+        if dtype != 'float32':
+            gluon_model.cast(dtype)
+            gluon_model.hybridize()
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
@@ -506,8 +512,12 @@ class Executor(object):
 
     def test_vgg16_ingestion(self, target="llvm", dtype='float32'):
         gluon_model, input_shape = get_network("vgg16", batch_size=1)
-        mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
+        if dtype != 'float32':
+            gluon_model.cast(dtype)
+            gluon_model.hybridize()
+        mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape}, dtype=dtype)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
+
 
     def test_vgg16bn_ingestion(self, target="llvm", dtype='float32'):
         gluon_model, input_shape = get_network("vgg16_bn", batch_size=1)
@@ -530,7 +540,8 @@ class Executor(object):
 
     def test_deeplabv3_ingestion(self, target="llvm", dtype='float32'):
         graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/frozen_inference_graph.pb"))
-        #tf.train.write_graph(graph_def, "./",name="deeplabv3_mobilenetv2.pbtxt")
+        graph_def = convert_to_fp16(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/frozen_inference_graph.pb"), input_name='ImageTensor',output_names=['SemanticPredictions'])
+        #tf.train.write_graph(graph_def, "./",name="deeplabv3_mobilenetv2.pb",as_text=False)
         graph_def = tf_importer.ProcessGraphDefParam(graph_def)
         #mod, params = relay.frontend.from_tensorflow(graph_def)
         mod, params = relay.frontend.from_tensorflow(graph_def, shape={"ImageTensor": (1,320,320,3)})
@@ -556,6 +567,50 @@ class Executor(object):
         data = np.random.uniform(size=input_shape["ImageTensor"]).astype(dtype)
         mod, params = build_tvm_graph_from_tflite(tflite_model_buf, data, 'ImageTensor')
 
+    def test_deeplabv3_onnx_ingestion(self, target="ullvm", dtype='float32'):
+        if dtype == 'float32':
+            graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
+            model = onnx.load_model(graph_file)
+        elif dtype == 'float16':
+            from onnxmltools.utils import convert_float_to_float16
+            graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
+            model = onnx.load_model(graph_file)
+            model = convert_float_to_float16(model)
+            #onnx.save_model(fp16model,'deeplabv3_mnv2_fp16.onnx')
+            # import ipdb
+            # ipdb.set_trace()
+            #graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2_fp16.onnx")
+            #model = onnx.load_model(graph_file)
+            # import ipdb
+            # ipdb.set_trace()
+            # for node in model.graph.node:
+            #     if len(node.input) > 8:
+            #         input = ""
+            #         output = ""
+            #         for i in range(len(node.input)):
+            #             input += node.input.pop()
+            #         for o in range(len(node.output)):
+            #             output += node.output.pop()
+            #         input = input[::-1]
+            #         output = output[::-1]
+            #         node.input.append(input)
+            #         node.output.append(output)
+            # nodes = []
+            # for i in range(len(model.graph.node)):
+            #     nodes.append(model.graph.node.pop(0))
+            # transpose = nodes.pop()
+            # for node in nodes:
+            #     model.graph.node.extend([node])
+            #     if node.output[0] in transpose.output[0]:
+            #         model.graph.node.extend([transpose])
+
+
+
+        input_shape = {"ImageTensor:0": (1,224,224,3)}
+        data = np.random.uniform(size=input_shape["ImageTensor:0"]).astype(dtype)
+        input_names, shape_dict = get_input_data_shape_dict(model, data)
+        mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11)
+        self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def test_inceptionv3_tf_ingestion(self, target="llvm", dtype='float32'):
         if dtype == 'float32':
@@ -641,8 +696,9 @@ def tune_tasks(tasks,
         os.remove(tmp_log_file)
 
     for i, tsk in enumerate(reversed(tasks)):
+        if i < 8:
+            continue
         prefix = "[Task %2d/%2d] " % (i+1, len(tasks))
-
         # create tuner
         if tuner == 'xgb' or tuner == 'xgb-rank':
             tuner_obj = XGBTuner(tsk, loss_type='rank')
@@ -690,9 +746,17 @@ if __name__ == "__main__":
     #test_runner.test_resnet50_ingestion(target="opencl --device=mali")
     #test_runner.test_resnet50_ingestion(target="opencl --device=mali", dtype='float16')
     #test_runner.test_inceptionv3_tf_ingestion(target="llvm")
+    # test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float32')
+    # test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float16')
+    #test_runner.run_pending_benchmarks()
+    #test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali")
+    # test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype='float16')
+    # test_runner.run_pending_benchmarks()
+
 
     # Unsuccessful
-    #test_runner.test_inceptionv3_ingestion(target="opencl --device=mali") # Broken pipe during RPC TVMArray.copyfrom/to
+    # test_runner.test_inceptionv3_ingestion(target="opencl --device=mali", dtype = 'float32') # TryConstFold Divide by zero (avgpool)
+    # test_runner.run_pending_benchmarks()
     #test_runner.test_vgg16_ingestion(target="opencl --device=mali") # OOM error mrpc:RPCProces: Throwing OutOfMemoryError "Failed to allocate a 411041848 byte allocation with 4969365 free bytes and 251MB until OOM, target footprint 9938733, growth limit 268435456" (VmSize 6622184 kB)
     #test_runner.test_mobilenetv3_ssdlite_ingestion() # Ingestion error: null argument to op.where
     #test_runner.test_deeplabv3_ingestion() # Ingestion error: op.subtract takes two args not three
@@ -708,6 +772,13 @@ if __name__ == "__main__":
     #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float32')
     #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali")
 
+    # inception v3 autotuning
+    test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali", dtype='float16')
+    opt = tuning_options
+    opt['log_filename'] = 'inceptionv3.fp16.autotvm.log'
+    test_runner.tune_pending_benchmarks(opt=opt)
+    #test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    test_runner.run_pending_benchmarks()
 
 
     #test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=tuning_options)
@@ -801,5 +872,10 @@ if __name__ == "__main__":
     # test_runner.test_resnet50_keras_ingestion(target="opencl --device=mali")
     # test_runner.run_pending_benchmarks()
 
-    test_runner.test_deeplabv3_tflite_ingestion(target="opencl --device=mali")
-    test_runner.run_pending_benchmarks()
+    #test_runner.test_vgg16_keras_ingestion(target="opencl --device=mali")
+    #test_runner.run_pending_benchmarks()
+    #test_runner.test_vgg16_keras_ingestion(target="opencl --device=mali", dtype='float16')
+    #test_runner.run_pending_benchmarks()
+
+    # test_runner.test_deeplabv3_tflite_ingestion(target="opencl --device=mali")
+    # test_runner.run_pending_benchmarks()
