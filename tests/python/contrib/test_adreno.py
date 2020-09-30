@@ -24,7 +24,7 @@ try:
     import tensorflow.compat.v1 as tf
 except ImportError:
     import tensorflow as tf
-from compare_with_tf import *
+#from compare_with_tf import *
 import onnx
 import onnxruntime
 
@@ -44,14 +44,22 @@ except ImportError:
 
 import argparse
 parser = argparse.ArgumentParser(description="Tune and/or evaluate a curated set of models")
-models = ['resnet50' 'mobilenetv1', 'inceptionv3', 'vgg16', 'mobilenetv3-ssdlite', 'deeplabv3']
+models = ['resnet50', 'mobilenetv1', 'inceptionv3', 'vgg16', 'mobilenetv3-ssdlite', 'deeplabv3']
 parser.add_argument('-m', '--model', type=str, default=None, required=True, help="Model to tune and/or evaluate", choices=models)
 parser.add_argument('-t', '--type', type=str, default="float32", choices=['float32', 'float16'], help="Specify whether the model should be run with single or half precision floating point values")
-parser.add_argument('-l', '--log', type=str, default="autotvm_tuning.log", help="AutoTVM tuning logfile name")
+parser.add_argument('-l', '--log', type=str, default=None, help="AutoTVM tuning logfile name")
 parser.add_argument('-k', '--rpc_key', type=str, default="android", help="RPC key to use")
 parser.add_argument('-r', '--rpc_tracker_host', type=str, default=os.environ["TVM_TRACKER_HOST"], help="RPC tracker host IP address")
 parser.add_argument('-p', '--rpc_tracker_port', type=str, default=os.environ["TVM_TRACKER_PORT"], help="RPC tracker host port")
-args = parser.parse_args()
+parser.add_argument('-T', '--target', type=str, default="opencl --device=mali", help="Compilation target")
+parser.add_argument('--tune', type=bool, default=False, help="Whether or not to run autotuning")
+
+def get_args():
+    args = parser.parse_args()
+    if args.log == None:
+        args.log = "logs/" + args.model + "." + args.type + ".autotvm.log"
+    return args
+args = get_args()
 device_key = args.rpc_key
 tracker_host = args.rpc_tracker_host
 tracker_port = int(args.rpc_tracker_port)
@@ -484,17 +492,11 @@ def get_network(name, batch_size=None, is_gluon_model=True):
     return model, data_shape
 
 class Executor(object):
-    def get_evaluators(self, models):
+    def schedule(self, model, *args, **kwargs):
         import inspect
-        evaluators = []
-        methods = inspect.getmembers(Executor)
-        for model in models:
-            for method in methods:
-            if "eval_" + model == method[0]:
-                def evaluator(*args, **kwargs):
-                    return method[1](self, *args, **kwargs)
-                evaluators[model] = evaluator
-                break
+        for method in inspect.getmembers(Executor):
+            if "import_" + model == method[0]:
+                return method[1](self, *args, **kwargs)
 
     def __init__(self, use_tracker=False):
         self.benchmarks = []
@@ -589,7 +591,8 @@ class Executor(object):
             self.benchmarks.append(tuned_benchmark)
         self.tuning_jobs.append(tune)
 
-    def test_resnet50_ingestion(self, target="llvm", dtype='float32'):
+    def import_resnet50(self, target="llvm", dtype='float32'):
+        import ipdb; ipdb.set_trace()
         gluon_model, input_shape = get_network("resnet50_v1", batch_size=1)
         if dtype != 'float32':
             gluon_model.cast(dtype)
@@ -597,14 +600,14 @@ class Executor(object):
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_resnet50_tf_ingestion(self, target="llvm", dtype='float32'):
+    def _import_resnet50_tf(self, target="llvm", dtype='float32'):
         graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/resnet50_v1.pb"))
         graph_def = tf_importer.ProcessGraphDefParam(graph_def)
         input_shape = {"input_tensor": (1,224,224,3)}
         mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_resnet50_onnx_ingestion(self, target="llvm", dtype='float32'):
+    def _import_resnet50_onnx(self, target="llvm", dtype='float32'):
         # Ingestion error, only used for conversion to SNPE DLC
         graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/mxnet_resnet50_v1_fp16.onnx")
         model = onnx.load_model(graph_file)
@@ -614,7 +617,7 @@ class Executor(object):
         mod, params = relay.frontend.from_onnx(model, shape_dict, opset=7)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_resnet50_keras_ingestion(self, target="llvm", dtype='float32'):
+    def _import_resnet50_keras(self, target="llvm", dtype='float32'):
         import keras
         keras.backend.set_floatx(dtype)
         model = keras.applications.resnet50.ResNet50()
@@ -622,7 +625,7 @@ class Executor(object):
         mod, params = relay.frontend.from_keras(model, input_shape)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_inceptionv3_ingestion(self, target="llvm", dtype='float32'):
+    def _import_inceptionv3_gluon(self, target="llvm", dtype='float32'):
         gluon_model, input_shape = get_network("inceptionv3", batch_size=1)
         if dtype != 'float32':
             gluon_model.cast(dtype)
@@ -630,7 +633,7 @@ class Executor(object):
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_mobilenetv1_ingestion(self, target="llvm", dtype='float32'):
+    def import_mobilenetv1(self, target="llvm", dtype='float32'):
         gluon_model, input_shape = get_network("mobilenet1.0", batch_size=1)
         # if dtype != 'float32':
         #     gluon_model.cast(dtype)
@@ -640,7 +643,7 @@ class Executor(object):
             mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_vgg16_keras_ingestion(self, target="llvm", dtype='float32'):
+    def _import_vgg16_keras(self, target="llvm", dtype='float32'):
         import keras
         keras.backend.set_floatx(dtype)
         model = keras.applications.vgg16.VGG16()
@@ -648,7 +651,7 @@ class Executor(object):
         mod, params = relay.frontend.from_keras(model, input_shape)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_vgg16_ingestion(self, target="llvm", dtype='float32'):
+    def import_vgg16(self, target="llvm", dtype='float32'):
         gluon_model, input_shape = get_network("vgg16", batch_size=1)
         if dtype != 'float32':
             gluon_model.cast(dtype)
@@ -657,12 +660,12 @@ class Executor(object):
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
 
-    def test_vgg16bn_ingestion(self, target="llvm", dtype='float32'):
+    def _import_vgg16bn(self, target="llvm", dtype='float32'):
         gluon_model, input_shape = get_network("vgg16_bn", batch_size=1)
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
         self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
-    def test_mobilenetv3_ssdlite_ingestion(self, target="llvm", dtype='float32'):
+    def _import_mobilenetv3_ssdlite_tf(self, target="llvm", dtype='float32'):
         # TF pretrained model ssd_mobilenet_v3_small_coco
         # Link: https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/tf1_detection_zoo.md
         # Direct Tensorflow approach
@@ -672,7 +675,7 @@ class Executor(object):
         mod, params = relay.frontend.from_tensorflow(graph_def, shape={"image_tensor": (1,300,300,3)})
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(self, target="llvm", dtype='float32'):
+    def import_mobilenetv3_ssdlite(self, target="llvm", dtype='float32'):
         # import tf2onnx
         # graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ft_graph_2.pb")
         # graph_def = tf_importer.get_workload(graph_file)
@@ -691,7 +694,7 @@ class Executor(object):
             mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_deeplabv3_ingestion(self, target="llvm", dtype='float32'):
+    def _import_deeplabv3_tf(self, target="llvm", dtype='float32'):
         if dtype == 'float16':
             graph_def = convert_to_fp16(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/frozen_inference_graph.pb"), input_name='ImageTensor',output_names=['SemanticPredictions'])
         else:
@@ -703,7 +706,7 @@ class Executor(object):
         mod, params = relay.frontend.from_tensorflow(graph_def, shape={"ImageTensor": (1,320,320,3)})
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_deeplabv3_tflite_ingestion(self, target="llvm", dtype='float32'):
+    def _import_deeplabv3_tflite(self, target="llvm", dtype='float32'):
         model_name = "deeplabv3_mnv2_pascal_train_aug"
         graph_def_path = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/")
         graph_def_file = os.path.abspath(graph_def_path  + "/" +  model_name + "/frozen_inference_graph.pb")
@@ -723,7 +726,7 @@ class Executor(object):
         data = np.random.uniform(size=input_shape["ImageTensor"]).astype(dtype)
         mod, params = build_tvm_graph_from_tflite(tflite_model_buf, data, 'ImageTensor')
 
-    def test_deeplabv3_onnx_ingestion(self, target="llvm", dtype='float32'):
+    def import_deeplabv3(self, target="llvm", dtype='float32'):
         graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
         model = onnx.load_model(graph_file)
         input_shape = {"ImageTensor:0": (1,224,224,3)}
@@ -735,7 +738,7 @@ class Executor(object):
             mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_inceptionv3_tf_ingestion(self, target="llvm", dtype='float32'):
+    def import_inceptionv3(self, target="llvm", dtype='float32'):
         if dtype == 'float32':
             graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/inception_v3_2016_08_28_frozen_opt.pb"))
             #tf.train.write_graph(graph_def, "./",name="inceptionv3.pbtxt")
@@ -750,7 +753,7 @@ class Executor(object):
         mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
-    def test_mobilenetv1_tf_ingestion(self, target="llvm"):
+    def _import_mobilenetv1_tf(self, target="llvm"):
         graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ssd_mobilenet_v1_coco.pb"))
         #tf.train.write_graph(graph_def, "./",name="ssd-mobilenetv1-coco.pbtxt")
         graph_def = tf_importer.ProcessGraphDefParam(graph_def)
@@ -760,7 +763,7 @@ class Executor(object):
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
 
-    def test_mobilenetv1_tflite_ingestion(self, target="llvm", dtype='float32'):
+    def _import_mobilenetv1_tflite(self, target="llvm", dtype='float32'):
         model_name = 'mobilenet_v1_1.0_224'
         http = "http://download.tensorflow.org/models/mobilenet_v1_2018_08_02/" + model_name + ".tgz"
         if dtype == 'float32':
@@ -798,26 +801,12 @@ class Executor(object):
         # mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
         # self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
-    def test_mobilenetv1_onnx_ingestion(self, target="llvm"):
+    def _import_mobilenetv1_onnx(self, target="llvm"):
         graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ssd_mnv1.op10.onnx")
         model = onnx.load_model(graph_file)
         data = np.random.uniform(size=(1, 3, 224, 224)).astype('float32')
         input_names, shape_dict = get_input_data_shape_dict(model, data)
         mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11)
-        self.schedule_jobs(mod, params, input_shape, dtype, target)
-
-    def test_matmul_onnx_ingestion(self, target="llvm", dtype='float32'):
-
-        graph_file = os.path.abspath("./dynamic_matmul.onnx")
-        model = onnx.load_model(graph_file)
-        #import ipdb; ipdb.set_trace()
-        M, N, K = 16, 16, 256
-        A = np.random.uniform(size=(M,K)).astype(dtype)
-        B = np.random.uniform(size=(K,N)).astype(dtype)
-        #C = np.random.uniform(size=(M,N)).astype(dtype)
-        #input_names, input_shape = get_input_data_shape_dict(model, [A,B,C])
-        input_names, input_shape = get_input_data_shape_dict(model, [A,B])
-        mod, params = relay.frontend.from_onnx(model, input_shape, opset=11)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
 
@@ -870,115 +859,120 @@ def tune_tasks(tasks,
 
 if __name__ == "__main__":
     executor = Executor(use_tracker="android")
-    dispatch = dict(zip(models, evaluators))
-
-
-    executor.test_resnet50_ingestion(target="opencl --device=mali", dtype='float32')
-    opt = tuning_options
-    opt['log_filename'] = 'resnet50.fp32.autotvm.log'
-    # executor.tune_pending_benchmarks(opt=opt)
-    executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    executor.schedule(args.model, target=args.target, dtype=args.type)
+    if args.tune:
+        executor.tune_pending_benchmarks()
+    else:
+        executor.tune_pending_benchmarks(apply_previous_tune=True)
     executor.run_pending_benchmarks()
 
 
-    if args.model == "resnet50":
-        executor.test_resnet50_ingestion(target="opencl --device=mali", dtype='float32')
-        opt = tuning_options
-        opt['log_filename'] = 'resnet50.fp32.autotvm.log'
-        # executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
-
-        # resnet50 autotuning (fp16)
-        executor.test_resnet50_ingestion(target="opencl --device=mali", dtype='float16')
-        opt = tuning_options
-        opt['log_filename'] = 'resnet50.fp16.autotvm.log'
-        # executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
-
-    # mobilenetv1 (fp32)
-    if args.model == "mobilenetv1":
-        executor.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float32')
-        opt = tuning_options
-        opt['log_filename'] = 'mobilenetv1_fp32_autotvm_tuning.log'
-        # executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
-
-        # mobilenetv1 (fp16)
-        executor.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float16')
-        opt = tuning_options
-        opt['log_filename'] = 'mobilenetv1_fp16_autotvm_tuning.log'
-        # executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
-
-    # inceptionv3 autotuning (fp32)
-    if args.model == "inceptionv3":
-        executor.test_inceptionv3_tf_ingestion(target="opencl --device=mali", dtype='float32')
-        opt = tuning_options
-        opt['log_filename'] = 'inceptionv3.fp32.autotvm.log'
-        #executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
-
-        # inceptionv3 autotuning (fp16)
-        executor.test_inceptionv3_tf_ingestion(target="opencl --device=mali", dtype='float16')
-        opt = tuning_options
-        opt['log_filename'] = 'inceptionv3.fp16.autotvm.log'
-        #executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
-
-    # vgg16 autotuning (fp32)
-    if args.model == "vgg16":
-        executor.test_vgg16_ingestion(target="opencl --device=mali", dtype='float32')
-        opt = tuning_options
-        opt['log_filename'] = 'vgg16.fp32.autotvm.log'
-        #executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
-
-        # vgg16 autotuning (fp16)
-        executor.test_vgg16_ingestion(target="opencl --device=mali", dtype='float16')
-        opt = tuning_options
-        opt['log_filename'] = 'vgg16.fp16.autotvm.log'
-        #executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
+    # executor.test_resnet50_ingestion(target="opencl --device=mali", dtype='float32')
+    # opt = tuning_options
+    # opt['log_filename'] = 'resnet50.fp32.autotvm.log'
+    # # executor.tune_pending_benchmarks(opt=opt)
+    # executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    # executor.run_pending_benchmarks()
 
 
-    # mobilenetv3-ssdlite autotuning (fp32)
-    if args.model == "mobilenetv3-ssdlite":
-        executor.test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(target="opencl --device=mali", dtype="float32")
-        opt = tuning_options
-        opt['log_filename'] = 'mobilenetv3-ssdlite.fp32.autotvm.log'
-        #executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
+    # if args.model == "resnet50":
+    #     executor.import_resnet50(target="opencl --device=mali", dtype='float32')
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'resnet50.fp32.autotvm.log'
+    #     # executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
 
-        # mobilenetv3-ssdlite autotuning (fp16)
-        executor.test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(target="opencl --device=mali", dtype="float16")
-        opt = tuning_options
-        opt['log_filename'] = 'mobilenetv3-ssdlite.fp16.autotvm.log'
-        #executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
+    #     # resnet50 autotuning (fp16)
+    #     executor.import_resnet50(target="opencl --device=mali", dtype='float16')
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'resnet50.fp16.autotvm.log'
+    #     # executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
 
-    # deeplabv3 autotuning (fp32)
-    if args.model == "deeplabv3":
-        executor.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype="float32")
-        opt = tuning_options
-        opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
-        #executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
+    # # mobilenetv1 (fp32)
+    # if args.model == "mobilenetv1":
+    #     executor.import_mobilenetv1(target="opencl --device=mali",dtype='float32')
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'mobilenetv1_fp32_autotvm_tuning.log'
+    #     # executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
 
-        # deeplabv3 autotuning (fp16)
-        executor.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype="float16")
-        opt = tuning_options
-        opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
-        #executor.tune_pending_benchmarks(opt=opt)
-        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-        executor.run_pending_benchmarks()
+    #     # mobilenetv1 (fp16)
+    #     executor.import_mobilenetv1(target="opencl --device=mali",dtype='float16')
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'mobilenetv1_fp16_autotvm_tuning.log'
+    #     # executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
+
+    # # inceptionv3 autotuning (fp32)
+    # if args.model == "inceptionv3":
+    #     executor.import_inceptionv3_tf(target="opencl --device=mali", dtype='float32')
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'inceptionv3.fp32.autotvm.log'
+    #     #executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
+
+    #     # inceptionv3 autotuning (fp16)
+    #     executor.import_inceptionv3_tf(target="opencl --device=mali", dtype='float16')
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'inceptionv3.fp16.autotvm.log'
+    #     #executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
+
+    # # vgg16 autotuning (fp32)
+    # if args.model == "vgg16":
+    #     executor.import_vgg16(target="opencl --device=mali", dtype='float32')
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'vgg16.fp32.autotvm.log'
+    #     #executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
+
+    #     # vgg16 autotuning (fp16)
+    #     executor.import_vgg16(target="opencl --device=mali", dtype='float16')
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'vgg16.fp16.autotvm.log'
+    #     #executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
+
+
+    # # mobilenetv3-ssdlite autotuning (fp32)
+    # if args.model == "mobilenetv3-ssdlite":
+    #     executor.import_mobilenetv3_ssdlite_pytorch_onnx(target="opencl --device=mali", dtype="float32")
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'mobilenetv3-ssdlite.fp32.autotvm.log'
+    #     #executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
+
+    #     # mobilenetv3-ssdlite autotuning (fp16)
+    #     executor.import_mobilenetv3_ssdlite_pytorch_onnx(target="opencl --device=mali", dtype="float16")
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'mobilenetv3-ssdlite.fp16.autotvm.log'
+    #     #executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
+
+    # # deeplabv3 autotuning (fp32)
+    # if args.model == "deeplabv3":
+    #     executor.import_deeplabv3_onnx(target="opencl --device=mali", dtype="float32")
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
+    #     #executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
+
+    #     # deeplabv3 autotuning (fp16)
+    #     executor.import_deeplabv3_onnx(target="opencl --device=mali", dtype="float16")
+    #     opt = tuning_options
+    #     opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
+    #     #executor.tune_pending_benchmarks(opt=opt)
+    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #     executor.run_pending_benchmarks()
