@@ -42,6 +42,27 @@ try:
 except ImportError:
     from tensorflow.contrib import lite as interpreter_wrapper
 
+import argparse
+parser = argparse.ArgumentParser(description="Tune and/or evaluate a curated set of models")
+models = ['resnet50' 'mobilenetv1', 'inceptionv3', 'vgg16', 'mobilenetv3-ssdlite', 'deeplabv3']
+parser.add_argument('-m', '--model', type=str, default=None, required=True, help="Model to tune and/or evaluate", choices=models)
+parser.add_argument('-t', '--type', type=str, default="float32", choices=['float32', 'float16'], help="Specify whether the model should be run with single or half precision floating point values")
+parser.add_argument('-l', '--log', type=str, default="autotvm_tuning.log", help="AutoTVM tuning logfile name")
+parser.add_argument('-k', '--rpc_key', type=str, default="android", help="RPC key to use")
+parser.add_argument('-r', '--rpc_tracker_host', type=str, default=os.environ["TVM_TRACKER_HOST"], help="RPC tracker host IP address")
+parser.add_argument('-p', '--rpc_tracker_port', type=str, default=os.environ["TVM_TRACKER_PORT"], help="RPC tracker host port")
+args = parser.parse_args()
+device_key = args.rpc_key
+tracker_host = args.rpc_tracker_host
+tracker_port = int(args.rpc_tracker_port)
+tuning_options = {
+    'log_filename': args.log,
+    'early_stopping': None,
+    'measure_option': autotvm.measure_option(
+        builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=1000),
+        runner=autotvm.RPCRunner(device_key, host=tracker_host, port=tracker_port, number=5, timeout=1000),
+    ),
+}
 
 def downcast_fp16(func, module):
     from tvm.relay.expr_functor import ExprMutator
@@ -450,21 +471,6 @@ def convert_to_fp16(path_to_model, input_name, output_names, target_type='fp16',
 
     return convert_graph_to_fp16(path_to_model, input_name=input_name, output_names=output_names, target_type=target_type)
 
-
-
-device_key = "android"
-tracker_host = os.environ["TVM_TRACKER_HOST"]
-tracker_port = int(os.environ["TVM_TRACKER_PORT"])
-
-tuning_options = {
-    'log_filename': "autotvm_tuning.log",
-    'early_stopping': None,
-    'measure_option': autotvm.measure_option(
-        builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=1000),
-        runner=autotvm.RPCRunner(device_key, host=tracker_host, port=tracker_port, number=5, timeout=1000),
-    ),
-}
-
 def get_network(name, batch_size=None, is_gluon_model=True):
     if is_gluon_model:
         model = gluon.model_zoo.vision.get_model(name, pretrained=True)
@@ -478,6 +484,18 @@ def get_network(name, batch_size=None, is_gluon_model=True):
     return model, data_shape
 
 class Executor(object):
+    def get_evaluators(self, models):
+        import inspect
+        evaluators = []
+        methods = inspect.getmembers(Executor)
+        for model in models:
+            for method in methods:
+            if "eval_" + model == method[0]:
+                def evaluator(*args, **kwargs):
+                    return method[1](self, *args, **kwargs)
+                evaluators[model] = evaluator
+                break
+
     def __init__(self, use_tracker=False):
         self.benchmarks = []
         self.tuning_jobs = []
@@ -563,10 +581,6 @@ class Executor(object):
                 print("Tuning kernels")
                 tune_tasks(tasks, **options)
 
-            # for i,task in enumerate(tasks):
-            #     dispatch_context = autotvm.apply_history_best(options["log_filename"])
-            #     best_config = dispatch_context.query(task.target, task.workload)
-            #     print("task", i, best_config)
             def tuned_benchmark():
                 print ("Apply best performing tuning profiles:")
                 with autotvm.apply_history_best(options["log_filename"]):
@@ -820,8 +834,6 @@ def tune_tasks(tasks,
         os.remove(tmp_log_file)
 
     for i, tsk in enumerate(reversed(tasks)):
-        # if i < 17:
-        #     continue
         prefix = "[Task %2d/%2d] " % (i+1, len(tasks))
         # create tuner
         if tuner == 'xgb' or tuner == 'xgb-rank':
@@ -856,217 +868,117 @@ def tune_tasks(tasks,
     os.remove(tmp_log_file)
 
 
-# RN50, InceptionV3, MobilenetV1, VGG16, Mobilenetv3-ssd, DeepLabv3-mobilenetv2
 if __name__ == "__main__":
-    #test_runner = Executor()
-    test_runner = Executor(use_tracker="android")
-    #test_runner.test_matmul_onnx_ingestion(target="opencl --device=mali")
-
-    #test_runner = Executor()
-    #test_runner = Executor(use_tracker="android")
-
-    # Successful
-    #test_runner.test_resnet50_ingestion(target="opencl --device=mali") # 0.373638 secs/iteration
-    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali") # 0.0861629 secs/iteration
-    #test_runner.test_mobilenetv1_ingestion(target="llvm")
-    #test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali") # 0.887882 secs/iteration
-    #test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali", dtype='float16') # 0.637642 secs/iteration
-    #test_runner.test_resnet50_ingestion(target="opencl --device=mali")
-    #test_runner.test_resnet50_ingestion(target="opencl --device=mali", dtype='float16')
-    #test_runner.test_inceptionv3_tf_ingestion(target="llvm")
-    #test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float32')
-    # test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float16')
-    #test_runner.run_pending_benchmarks()
-    #test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali")
-    #test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype='float16')
-    #test_runner.run_pending_benchmarks()
+    executor = Executor(use_tracker="android")
+    dispatch = dict(zip(models, evaluators))
 
 
-    # Unsuccessful
-    # test_runner.test_inceptionv3_ingestion(target="opencl --device=mali", dtype = 'float32') # TryConstFold Divide by zero (avgpool)
-    # test_runner.run_pending_benchmarks()
-    #test_runner.test_vgg16_ingestion(target="opencl --device=mali") # OOM error mrpc:RPCProces: Throwing OutOfMemoryError "Failed to allocate a 411041848 byte allocation with 4969365 free bytes and 251MB until OOM, target footprint 9938733, growth limit 268435456" (VmSize 6622184 kB)
-    #test_runner.test_mobilenetv3_ssdlite_ingestion()
-    #test_runner.test_deeplabv3_ingestion() # Ingestion error: op.subtract takes two args not three
-    #test_runner.test_mobilenetv1_tf_ingestion(target="opencl --device=mali") #  Ingestion error: File "/Users/csullivan/Projects/incubator-tvm/src/relay/transforms/fold_scale_axis.cc", line 246 # TVMError: FoldScaleAxis only accept dataflow-form
-    #test_runner.test_mobilenetv1_tflite_ingestion(target="opencl --device=mali")
-    #test_runner.test_mobilenetv1_onnx_ingestion(target="opencl --device=mali")
-
-    # Untested
-
-    # Tuning
-    #test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali")
-    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float16')
-    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float32')
-    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali")
-
-    # inception v3 autotuning
-    # test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali", dtype='float16')
-    # opt = tuning_options
-    # opt['log_filename'] = 'inceptionv3.fp16.autotvm.log'
-    # #test_runner.tune_pending_benchmarks(opt=opt)
-    # #test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #test_runner.run_pending_benchmarks()
-
-    # resnet50 autotuning
-    # test_runner.test_resnet50_ingestion(target="opencl --device=mali", dtype='float16')
-    # opt = tuning_options
-    # opt['log_filename'] = 'resnet50.fp16.autotvm.log'
-    # # test_runner.tune_pending_benchmarks(opt=opt)
-    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    # test_runner.run_pending_benchmarks()
-
-    # vgg16 autotuning fp32
-    # test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float32')
-    # opt = tuning_options
-    # opt['log_filename'] = 'vgg16.fp32.autotvm.log'
-    # #test_runner.tune_pending_benchmarks(opt=opt)
-    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    # test_runner.run_pending_benchmarks()
-
-    # vgg16 autotuning fp16
-    # test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float16')
-    # opt = tuning_options
-    # opt['log_filename'] = 'vgg16.fp16.autotvm.log'
-    # #test_runner.tune_pending_benchmarks(opt=opt)
-    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    # test_runner.run_pending_benchmarks()
-
-
-
-    #test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=tuning_options)
-    #test_runner.run_pending_benchmarks()
-
-    # tflite
-
-    #test_runner.test_mobilenetv1_tflite_ingestion(target="opencl --device=mali", dtype='float32')
-    # opt = tuning_options
-    # opt['log_filename'] = 'mobilenetv1.fp32.autotvm.log'
-    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #test_runner.run_pending_benchmarks()
-
-    #opt['log_filename'] = 'mobilenetv1.fp32.autotvm_tuning.fp16.poco865.log'
-    #test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-
-    ## tune tflite fp16
-    # test_runner.test_mobilenetv1_tflite_ingestion(target="opencl --device=mali", dtype='float16')
-    # opt = tuning_options
-    # opt['log_filename'] = 'mobilenetv1_tflite_fp16_autotvm_tuning.log'
-    # test_runner.tune_pending_benchmarks(opt=opt)
-    # test_runner.run_pending_benchmarks()
-
-    ## mobilenetv1 tflite fp32 tuned
-    # 0.0359528 secs/iteration
-    # test_runner.test_mobilenetv1_tflite_ingestion(target="opencl --device=mali", dtype='float32')
-    # opt = tuning_options
-    # opt['log_filename'] = 'mobilenetv1_tflite_fp32_autotvm_tuning.log'
-    # test_runner.tune_pending_benchmarks(opt=opt)
-    # test_runner.run_pending_benchmarks()
-
-
-    #test_runner.test_mobilenetv1_tflite_ingestion(target="opencl --device=mali", dtype='float16')
-    #test_runner.run_pending_benchmarks()
-
-    # mobilenetv1 tflite fp32 (tune from gluon import)
-    # 0.0389187 secs/iteration
-    # test_runner.test_mobilenetv1_tflite_ingestion(target="opencl --device=mali", dtype='float32')
-    # opt = tuning_options
-    # opt['log_filename'] = 'mobilenetv1.fp32.autotvm.log' # from gluon tuning, some missing
-    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    # test_runner.run_pending_benchmarks()
-
-    # mobilenetv1 tflite fp16 (tune from gluon import)
-    # 0.0352906 secs/iteration
-    # test_runner.test_mobilenetv1_tflite_ingestion(target="opencl --device=mali", dtype='float16')
-    # opt = tuning_options
-    # opt['log_filename'] = 'mobilenetv1_tflite_fp16_autotvm_tuning.log'
-    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    # test_runner.run_pending_benchmarks()
-
-
-    # mobilenetv1 gluon fp32
-    # 0.0346617 secs/iteration
-    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float32')
-    # opt = tuning_options
-    # opt['log_filename'] = 'mobilenetv1_gluon_fp32_autotvm_tuning.log'
-    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #test_runner.run_pending_benchmarks()
-
-    # mobilenetv1 gluon fp16
-    # 0.0300264 secs/iteration
-    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float16')
-    # opt = tuning_options
-    # opt['log_filename'] = 'mobilenetv1_gluon_fp16_autotvm_tuning.log'
-    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #test_runner.run_pending_benchmarks()
-
-    # # vgg16 gluon fp32
-    # 0.372 secs/iteration
-    # test_runner.test_resnet50_ingestion(target="opencl --device=mali", dtype='float32')
-    # test_runner.test_resnet50_onnx_ingestion(target="opencl --device=mali", dtype='float32')
-    # test_runner.run_pending_benchmarks()
-
-    # resnet50 gluon fp16
-    # 0.372 secs/iteration
-    # test_runner.test_resnet50_ingestion(target="opencl --device=mali", dtype='float16')
-    # test_runner.run_pending_benchmarks()
-
-    # test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali", dtype='float16')
-    # opt = tuning_options
-    # opt['log_filename'] = 'tmp_finish.log'
-    # test_runner.tune_pending_benchmarks(opt=opt)
-    # test_runner.run_pending_benchmarks()
-
-
-    #test_runner.test_inceptionv3_ingestion(target="opencl --device=mali") # Broken pipe during RPC TVMArray.copyfrom/to
-    #test_runner.run_pending_benchmarks()
-
-    # resnet50 keras/tf fp32
-    # 0.365892 secs/iteration
-    # test_runner.test_resnet50_keras_ingestion(target="opencl --device=mali")
-    # test_runner.run_pending_benchmarks()
-
-    # test_runner.test_resnet50_tf_ingestion(target="opencl --device=mali") # 0.42 s
-    # test_runner.run_pending_benchmarks()
-
-    #test_runner.test_vgg16_keras_ingestion(target="opencl --device=mali")
-    #test_runner.run_pending_benchmarks()
-    #test_runner.test_vgg16_keras_ingestion(target="opencl --device=mali", dtype='float16')
-    #test_runner.run_pending_benchmarks()
-
-    # test_runner.test_deeplabv3_tflite_ingestion(target="opencl --device=mali")
-    # test_runner.run_pending_benchmarks()
-
-    # # deeplabv3 autotuning
-    # test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype="float32")
-    # opt = tuning_options
-    # opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
-    # #test_runner.tune_pending_benchmarks(opt=opt)
-    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    # test_runner.run_pending_benchmarks()
-
-    # deeplabv3 autotuning fp16
-    #test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype="float16")
-    #opt = tuning_options
-    #opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
-    #test_runner.tune_pending_benchmarks(opt=opt)
-    #test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #test_runner.run_pending_benchmarks()
-
-    # mobilenetv3-ssdlite autotuning fp32
-    #test_runner.test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(target="opencl --device=mali", dtype="float32")
-    # opt = tuning_options
-    # opt['log_filename'] = 'mobilenetv3-ssdlite.fp32.autotvm.log'
-    # test_runner.tune_pending_benchmarks(opt=opt)
-    #test_runner.run_pending_benchmarks()
-
-    # mobilenetv3-ssdlite autotuning fp16
-    #test_runner.test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(target="opencl --device=mali", dtype="float16")
-    test_runner.test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(target="llvm", dtype="float16")
+    executor.test_resnet50_ingestion(target="opencl --device=mali", dtype='float32')
     opt = tuning_options
-    opt['log_filename'] = 'mobilenetv3-ssdlite.fp16.autotvm.log'
-    test_runner.tune_pending_benchmarks(opt=opt)
-    test_runner.run_pending_benchmarks()
+    opt['log_filename'] = 'resnet50.fp32.autotvm.log'
+    # executor.tune_pending_benchmarks(opt=opt)
+    executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    executor.run_pending_benchmarks()
 
-    # opt['log_filename'] = 'mobilenetv1_gluon_fp32_autotvm_tuning.log'
-    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+
+    if args.model == "resnet50":
+        executor.test_resnet50_ingestion(target="opencl --device=mali", dtype='float32')
+        opt = tuning_options
+        opt['log_filename'] = 'resnet50.fp32.autotvm.log'
+        # executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+        # resnet50 autotuning (fp16)
+        executor.test_resnet50_ingestion(target="opencl --device=mali", dtype='float16')
+        opt = tuning_options
+        opt['log_filename'] = 'resnet50.fp16.autotvm.log'
+        # executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+    # mobilenetv1 (fp32)
+    if args.model == "mobilenetv1":
+        executor.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float32')
+        opt = tuning_options
+        opt['log_filename'] = 'mobilenetv1_fp32_autotvm_tuning.log'
+        # executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+        # mobilenetv1 (fp16)
+        executor.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float16')
+        opt = tuning_options
+        opt['log_filename'] = 'mobilenetv1_fp16_autotvm_tuning.log'
+        # executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+    # inceptionv3 autotuning (fp32)
+    if args.model == "inceptionv3":
+        executor.test_inceptionv3_tf_ingestion(target="opencl --device=mali", dtype='float32')
+        opt = tuning_options
+        opt['log_filename'] = 'inceptionv3.fp32.autotvm.log'
+        #executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+        # inceptionv3 autotuning (fp16)
+        executor.test_inceptionv3_tf_ingestion(target="opencl --device=mali", dtype='float16')
+        opt = tuning_options
+        opt['log_filename'] = 'inceptionv3.fp16.autotvm.log'
+        #executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+    # vgg16 autotuning (fp32)
+    if args.model == "vgg16":
+        executor.test_vgg16_ingestion(target="opencl --device=mali", dtype='float32')
+        opt = tuning_options
+        opt['log_filename'] = 'vgg16.fp32.autotvm.log'
+        #executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+        # vgg16 autotuning (fp16)
+        executor.test_vgg16_ingestion(target="opencl --device=mali", dtype='float16')
+        opt = tuning_options
+        opt['log_filename'] = 'vgg16.fp16.autotvm.log'
+        #executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+
+    # mobilenetv3-ssdlite autotuning (fp32)
+    if args.model == "mobilenetv3-ssdlite":
+        executor.test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(target="opencl --device=mali", dtype="float32")
+        opt = tuning_options
+        opt['log_filename'] = 'mobilenetv3-ssdlite.fp32.autotvm.log'
+        #executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+        # mobilenetv3-ssdlite autotuning (fp16)
+        executor.test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(target="opencl --device=mali", dtype="float16")
+        opt = tuning_options
+        opt['log_filename'] = 'mobilenetv3-ssdlite.fp16.autotvm.log'
+        #executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+    # deeplabv3 autotuning (fp32)
+    if args.model == "deeplabv3":
+        executor.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype="float32")
+        opt = tuning_options
+        opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
+        #executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
+
+        # deeplabv3 autotuning (fp16)
+        executor.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype="float16")
+        opt = tuning_options
+        opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
+        #executor.tune_pending_benchmarks(opt=opt)
+        executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+        executor.run_pending_benchmarks()
