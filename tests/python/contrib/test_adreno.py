@@ -42,7 +42,109 @@ try:
 except ImportError:
     from tensorflow.contrib import lite as interpreter_wrapper
 
-import onnx
+
+def downcast_fp16(func, module):
+    from tvm.relay.expr_functor import ExprMutator
+    from tvm.relay.expr import Call, Var, Constant, TupleGetItem
+    from tvm.relay import transform as _transform
+    from tvm.relay import cast
+    from tvm.ir import IRModule
+    from tvm.relay import function as _function
+    # pylint: disable=line-too-long
+    """Downcast to fp16 mutator
+    Parameters
+    ---------
+    graph: Function
+        The original graph.
+
+    Retruns
+    -------
+    The graph after dowmcasting to half-precision floating-point.
+    """
+    # get_valid_counts and non_max_suppression does not support fp16 so we create a filter list for them
+    filter_list = ['vision.get_valid_counts', 'vision.non_max_suppression']
+    class DowncastMutator(ExprMutator):
+        """Downcast to fp16 mutator"""
+        def visit_call(self, call):
+            dtype = 'float32' if call.op.name in filter_list else 'float16'
+            new_fn = self.visit(call.op)
+            # Collec the original dtypes
+            type_list = []
+            if call.op.name in filter_list:
+                # For nms
+                for arg in call.args:
+                    if isinstance(arg, TupleGetItem) and isinstance(arg.tuple_value, Call):
+                        tuple_types = arg.tuple_value.checked_type.fields
+                        type_list.append(tuple_types[arg.index].dtype)
+                if call.op.name == 'vision.get_valid_counts':
+                    tuple_types = call.checked_type.fields
+                    for cur_type in tuple_types:
+                        type_list.append(cur_type.dtype)
+
+            args = [self.visit(arg) for arg in call.args]
+            new_args = list()
+            arg_idx = 0
+            for arg in args:
+                if isinstance(arg, (Var, Constant)):
+                    new_args.append(cast(arg, dtype=dtype))
+                else:
+                    if call.op.name in filter_list:
+                        if isinstance(arg, TupleGetItem) and type_list[arg_idx] == 'int32':
+                            new_args.append(arg)
+                        else:
+                            new_args.append(cast(arg, dtype=dtype))
+                    else:
+                        new_args.append(arg)
+                arg_idx += 1
+            if call.op.name in filter_list and call.op.name != 'vision.get_valid_counts':
+                return cast(Call(new_fn, new_args, call.attrs), dtype='float16')
+            return Call(new_fn, new_args, call.attrs)
+
+    class UpcastMutator(ExprMutator):
+        """upcast output back to fp32 mutator"""
+        def visit_call(self, call):
+            return cast(call, dtype='float32')
+
+    def infer_type(node, mod=None):
+        """A method to infer the type of an intermediate node in the relay graph."""
+        if isinstance(mod, IRModule):
+            mod["main"] = _function.Function(tvm.relay.analysis.free_vars(node), node)
+            mod = _transform.InferType()(mod)
+            entry = mod["main"]
+            ret = entry.body
+        else:
+            new_mod = IRModule.from_expr(node)
+            if mod is not None:
+                new_mod.update(mod)
+                new_mod = _transform.InferType()(new_mod)
+                entry = new_mod["main"]
+                ret = entry if isinstance(node, _function.Function) else entry.body
+
+        return ret
+
+    import ipdb; ipdb.set_trace()
+    func = infer_type(func, module)
+    downcast_pass = DowncastMutator()
+    func = downcast_pass.visit(func)
+    upcast_pass = UpcastMutator()
+    func = upcast_pass.visit(func)
+    func = infer_type(func, module)
+    new_mod = IRModule.from_expr(func)
+    #new_mod.update(module)
+    return new_mod
+
+
+
+def get_output_nodes_from_onnx_graph(graph):
+    inputs = set()
+    outputs = set()
+    for node in graph.node:
+        for inp in node.input:
+            inputs.add(inp)
+        for out in node.output:
+            outputs.add(out)
+    return outputs - inputs
+
 
 def get_output_nodes_from_graph_def(graph_def):
     with tf.Graph().as_default() as graph:
@@ -50,12 +152,15 @@ def get_output_nodes_from_graph_def(graph_def):
     inputs = set()
     for op in graph.get_operations():
         for inp in op.inputs:
+            print(inp.name)
+            print(inp.name.split(":")[0])
             inputs.add(inp.name.split(":")[0])
     outputs = []
     for op in graph.get_operations():
-        if op.name not in inputs:
+        print('op: ', op.name)
+        if op.name not in inputs and len(op.inputs) > 0:
             outputs.append(op.name)
-    return outputs
+    return inputs, outputs
 
 def get_input_data_shape_dict(graph_def, input_data):
     if isinstance(input_data, list):
@@ -355,8 +460,8 @@ tuning_options = {
     'log_filename': "autotvm_tuning.log",
     'early_stopping': None,
     'measure_option': autotvm.measure_option(
-        builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=10),
-        runner=autotvm.RPCRunner(device_key, host=tracker_host, port=tracker_port, number=5, timeout=10),
+        builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=1000),
+        runner=autotvm.RPCRunner(device_key, host=tracker_host, port=tracker_port, number=5, timeout=1000),
     ),
 }
 
@@ -390,7 +495,7 @@ class Executor(object):
         from tvm import rpc
         print("Tracker attempting connection on {}:{}".format(tracker_host, tracker_port))
         self.tracker = rpc.connect_tracker(tracker_host, tracker_port)
-        self.remote = self.tracker.request(device_key, priority=0,session_timeout=60)
+        self.remote = self.tracker.request(device_key, priority=0,session_timeout=600)
         print("Tracker connected to remote RPC server")
 
     def disconnect_tracker(self):
@@ -458,12 +563,12 @@ class Executor(object):
                 print("Tuning kernels")
                 tune_tasks(tasks, **options)
 
-            print ("Apply best performing tuning profiles:")
-            for i,task in enumerate(tasks):
-                dispatch_context = autotvm.apply_history_best(options["log_filename"])
-                best_config = dispatch_context.query(task.target, task.workload)
-                print("task", i, best_config)
+            # for i,task in enumerate(tasks):
+            #     dispatch_context = autotvm.apply_history_best(options["log_filename"])
+            #     best_config = dispatch_context.query(task.target, task.workload)
+            #     print("task", i, best_config)
             def tuned_benchmark():
+                print ("Apply best performing tuning profiles:")
                 with autotvm.apply_history_best(options["log_filename"]):
                     self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
             self.benchmarks.pop(benchmark_index)
@@ -476,6 +581,23 @@ class Executor(object):
             gluon_model.cast(dtype)
             gluon_model.hybridize()
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
+        self.schedule_jobs(mod, params, input_shape, dtype, target)
+
+    def test_resnet50_tf_ingestion(self, target="llvm", dtype='float32'):
+        graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/resnet50_v1.pb"))
+        graph_def = tf_importer.ProcessGraphDefParam(graph_def)
+        input_shape = {"input_tensor": (1,224,224,3)}
+        mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
+        self.schedule_jobs(mod, params, input_shape, dtype, target)
+
+    def test_resnet50_onnx_ingestion(self, target="llvm", dtype='float32'):
+        # Ingestion error, only used for conversion to SNPE DLC
+        graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/mxnet_resnet50_v1_fp16.onnx")
+        model = onnx.load_model(graph_file)
+        input_shape = {"data": (1,3,224,224)}
+        data = np.random.uniform(size=input_shape["data"]).astype(dtype)
+        input_names, shape_dict = get_input_data_shape_dict(model, data)
+        mod, params = relay.frontend.from_onnx(model, shape_dict, opset=7)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def test_resnet50_keras_ingestion(self, target="llvm", dtype='float32'):
@@ -496,10 +618,12 @@ class Executor(object):
 
     def test_mobilenetv1_ingestion(self, target="llvm", dtype='float32'):
         gluon_model, input_shape = get_network("mobilenet1.0", batch_size=1)
-        if dtype != 'float32':
-            gluon_model.cast(dtype)
-            gluon_model.hybridize()
-        mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape}, dtype=dtype)
+        # if dtype != 'float32':
+        #     gluon_model.cast(dtype)
+        #     gluon_model.hybridize()
+        mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
+        if dtype == 'float16':
+            mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def test_vgg16_keras_ingestion(self, target="llvm", dtype='float32'):
@@ -524,23 +648,41 @@ class Executor(object):
         mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
         self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
-    def test_mobilenetv3_ssdlite_ingestion(self, check = False):
+    def test_mobilenetv3_ssdlite_ingestion(self, target="llvm", dtype='float32'):
         # TF pretrained model ssd_mobilenet_v3_small_coco
         # Link: https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/tf1_detection_zoo.md
         # Direct Tensorflow approach
-        graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/mobilenetv3_ssdlite_tf1.15export/frozen_inference_graph.pb"))
+        graph_def = tf_importer.get_workload(os.path.abspath("/Users/csullivan/Downloads/frozen_inference_graph.pb"))
         #tf.train.write_graph(graph_def, "./",name="mnv3-ssdlite-tf1.15export.pbtxt")
         graph_def = tf_importer.ProcessGraphDefParam(graph_def)
-        if check:
-            mod, params = relay.frontend.from_tensorflow(graph_def)
-        else:
-            mod, params = relay.frontend.from_tensorflow(graph_def, shape={"image_tensor": (1,320,320,3)})
+        mod, params = relay.frontend.from_tensorflow(graph_def, shape={"image_tensor": (1,300,300,3)})
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
+    def test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(self, target="llvm", dtype='float32'):
+        # import tf2onnx
+        # graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ft_graph_2.pb")
+        # graph_def = tf_importer.get_workload(graph_file)
+        # graph_def = tf_importer.ProcessGraphDefParam(graph_def)
+        # with tf.Graph().as_default():
+        #     tf.import_graph_def(graph_def, name="")
+        #     with tf.Session() as sess:
+        #         model = tf2onnx.tfonnx.process_tf_graph(sess.graph, input_names=['input.1:0'], output_names=['scores:0', 'boxes:0'])
+
+        graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/mb3-ssd_2.onnx")
+        model = onnx.load_model(graph_file)
+        data = np.random.uniform(size=(1, 3, 300, 300)).astype(dtype)
+        input_names, input_shape = get_input_data_shape_dict(model, data)
+        mod, params = relay.frontend.from_onnx(model, input_shape, opset=11)
+        if dtype == 'float16':
+            mod = downcast_fp16(mod["main"], mod)
+        self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def test_deeplabv3_ingestion(self, target="llvm", dtype='float32'):
-        graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/frozen_inference_graph.pb"))
-        graph_def = convert_to_fp16(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/frozen_inference_graph.pb"), input_name='ImageTensor',output_names=['SemanticPredictions'])
+        if dtype == 'float16':
+            graph_def = convert_to_fp16(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/frozen_inference_graph.pb"), input_name='ImageTensor',output_names=['SemanticPredictions'])
+        else:
+            graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/frozen_inference_graph.pb"))
+
         #tf.train.write_graph(graph_def, "./",name="deeplabv3_mobilenetv2.pb",as_text=False)
         graph_def = tf_importer.ProcessGraphDefParam(graph_def)
         #mod, params = relay.frontend.from_tensorflow(graph_def)
@@ -567,49 +709,16 @@ class Executor(object):
         data = np.random.uniform(size=input_shape["ImageTensor"]).astype(dtype)
         mod, params = build_tvm_graph_from_tflite(tflite_model_buf, data, 'ImageTensor')
 
-    def test_deeplabv3_onnx_ingestion(self, target="ullvm", dtype='float32'):
-        if dtype == 'float32':
-            graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
-            model = onnx.load_model(graph_file)
-        elif dtype == 'float16':
-            from onnxmltools.utils import convert_float_to_float16
-            graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
-            model = onnx.load_model(graph_file)
-            model = convert_float_to_float16(model)
-            #onnx.save_model(fp16model,'deeplabv3_mnv2_fp16.onnx')
-            # import ipdb
-            # ipdb.set_trace()
-            #graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2_fp16.onnx")
-            #model = onnx.load_model(graph_file)
-            # import ipdb
-            # ipdb.set_trace()
-            # for node in model.graph.node:
-            #     if len(node.input) > 8:
-            #         input = ""
-            #         output = ""
-            #         for i in range(len(node.input)):
-            #             input += node.input.pop()
-            #         for o in range(len(node.output)):
-            #             output += node.output.pop()
-            #         input = input[::-1]
-            #         output = output[::-1]
-            #         node.input.append(input)
-            #         node.output.append(output)
-            # nodes = []
-            # for i in range(len(model.graph.node)):
-            #     nodes.append(model.graph.node.pop(0))
-            # transpose = nodes.pop()
-            # for node in nodes:
-            #     model.graph.node.extend([node])
-            #     if node.output[0] in transpose.output[0]:
-            #         model.graph.node.extend([transpose])
-
-
-
+    def test_deeplabv3_onnx_ingestion(self, target="llvm", dtype='float32'):
+        graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
+        model = onnx.load_model(graph_file)
         input_shape = {"ImageTensor:0": (1,224,224,3)}
         data = np.random.uniform(size=input_shape["ImageTensor:0"]).astype(dtype)
         input_names, shape_dict = get_input_data_shape_dict(model, data)
         mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11)
+        if dtype == 'float16':
+            import ipdb; ipdb.set_trace()
+            mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def test_inceptionv3_tf_ingestion(self, target="llvm", dtype='float32'):
@@ -683,6 +792,21 @@ class Executor(object):
         mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
+    def test_matmul_onnx_ingestion(self, target="llvm", dtype='float32'):
+
+        graph_file = os.path.abspath("./dynamic_matmul.onnx")
+        model = onnx.load_model(graph_file)
+        #import ipdb; ipdb.set_trace()
+        M, N, K = 16, 16, 256
+        A = np.random.uniform(size=(M,K)).astype(dtype)
+        B = np.random.uniform(size=(K,N)).astype(dtype)
+        #C = np.random.uniform(size=(M,N)).astype(dtype)
+        #input_names, input_shape = get_input_data_shape_dict(model, [A,B,C])
+        input_names, input_shape = get_input_data_shape_dict(model, [A,B])
+        mod, params = relay.frontend.from_onnx(model, input_shape, opset=11)
+        self.schedule_jobs(mod, params, input_shape, dtype, target)
+
+
 def tune_tasks(tasks,
                measure_option,
                tuner='xgb',
@@ -696,8 +820,8 @@ def tune_tasks(tasks,
         os.remove(tmp_log_file)
 
     for i, tsk in enumerate(reversed(tasks)):
-        if i < 8:
-            continue
+        # if i < 17:
+        #     continue
         prefix = "[Task %2d/%2d] " % (i+1, len(tasks))
         # create tuner
         if tuner == 'xgb' or tuner == 'xgb-rank':
@@ -736,6 +860,10 @@ def tune_tasks(tasks,
 if __name__ == "__main__":
     #test_runner = Executor()
     test_runner = Executor(use_tracker="android")
+    #test_runner.test_matmul_onnx_ingestion(target="opencl --device=mali")
+
+    #test_runner = Executor()
+    #test_runner = Executor(use_tracker="android")
 
     # Successful
     #test_runner.test_resnet50_ingestion(target="opencl --device=mali") # 0.373638 secs/iteration
@@ -746,19 +874,19 @@ if __name__ == "__main__":
     #test_runner.test_resnet50_ingestion(target="opencl --device=mali")
     #test_runner.test_resnet50_ingestion(target="opencl --device=mali", dtype='float16')
     #test_runner.test_inceptionv3_tf_ingestion(target="llvm")
-    # test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float32')
+    #test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float32')
     # test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float16')
     #test_runner.run_pending_benchmarks()
     #test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali")
-    # test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype='float16')
-    # test_runner.run_pending_benchmarks()
+    #test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype='float16')
+    #test_runner.run_pending_benchmarks()
 
 
     # Unsuccessful
     # test_runner.test_inceptionv3_ingestion(target="opencl --device=mali", dtype = 'float32') # TryConstFold Divide by zero (avgpool)
     # test_runner.run_pending_benchmarks()
     #test_runner.test_vgg16_ingestion(target="opencl --device=mali") # OOM error mrpc:RPCProces: Throwing OutOfMemoryError "Failed to allocate a 411041848 byte allocation with 4969365 free bytes and 251MB until OOM, target footprint 9938733, growth limit 268435456" (VmSize 6622184 kB)
-    #test_runner.test_mobilenetv3_ssdlite_ingestion() # Ingestion error: null argument to op.where
+    #test_runner.test_mobilenetv3_ssdlite_ingestion()
     #test_runner.test_deeplabv3_ingestion() # Ingestion error: op.subtract takes two args not three
     #test_runner.test_mobilenetv1_tf_ingestion(target="opencl --device=mali") #  Ingestion error: File "/Users/csullivan/Projects/incubator-tvm/src/relay/transforms/fold_scale_axis.cc", line 246 # TVMError: FoldScaleAxis only accept dataflow-form
     #test_runner.test_mobilenetv1_tflite_ingestion(target="opencl --device=mali")
@@ -773,12 +901,37 @@ if __name__ == "__main__":
     #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali")
 
     # inception v3 autotuning
-    test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali", dtype='float16')
-    opt = tuning_options
-    opt['log_filename'] = 'inceptionv3.fp16.autotvm.log'
-    test_runner.tune_pending_benchmarks(opt=opt)
-    #test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    test_runner.run_pending_benchmarks()
+    # test_runner.test_inceptionv3_tf_ingestion(target="opencl --device=mali", dtype='float16')
+    # opt = tuning_options
+    # opt['log_filename'] = 'inceptionv3.fp16.autotvm.log'
+    # #test_runner.tune_pending_benchmarks(opt=opt)
+    # #test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #test_runner.run_pending_benchmarks()
+
+    # resnet50 autotuning
+    # test_runner.test_resnet50_ingestion(target="opencl --device=mali", dtype='float16')
+    # opt = tuning_options
+    # opt['log_filename'] = 'resnet50.fp16.autotvm.log'
+    # # test_runner.tune_pending_benchmarks(opt=opt)
+    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    # test_runner.run_pending_benchmarks()
+
+    # vgg16 autotuning fp32
+    # test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float32')
+    # opt = tuning_options
+    # opt['log_filename'] = 'vgg16.fp32.autotvm.log'
+    # #test_runner.tune_pending_benchmarks(opt=opt)
+    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    # test_runner.run_pending_benchmarks()
+
+    # vgg16 autotuning fp16
+    # test_runner.test_vgg16_ingestion(target="opencl --device=mali", dtype='float16')
+    # opt = tuning_options
+    # opt['log_filename'] = 'vgg16.fp16.autotvm.log'
+    # #test_runner.tune_pending_benchmarks(opt=opt)
+    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    # test_runner.run_pending_benchmarks()
+
 
 
     #test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=tuning_options)
@@ -833,23 +986,24 @@ if __name__ == "__main__":
 
     # mobilenetv1 gluon fp32
     # 0.0346617 secs/iteration
-    # test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float32')
+    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float32')
     # opt = tuning_options
     # opt['log_filename'] = 'mobilenetv1_gluon_fp32_autotvm_tuning.log'
     # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    # test_runner.run_pending_benchmarks()
+    #test_runner.run_pending_benchmarks()
 
     # mobilenetv1 gluon fp16
     # 0.0300264 secs/iteration
-    # test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float16')
+    #test_runner.test_mobilenetv1_ingestion(target="opencl --device=mali",dtype='float16')
     # opt = tuning_options
     # opt['log_filename'] = 'mobilenetv1_gluon_fp16_autotvm_tuning.log'
     # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    # test_runner.run_pending_benchmarks()
+    #test_runner.run_pending_benchmarks()
 
-    # # resnet50 gluon fp32
+    # # vgg16 gluon fp32
     # 0.372 secs/iteration
     # test_runner.test_resnet50_ingestion(target="opencl --device=mali", dtype='float32')
+    # test_runner.test_resnet50_onnx_ingestion(target="opencl --device=mali", dtype='float32')
     # test_runner.run_pending_benchmarks()
 
     # resnet50 gluon fp16
@@ -872,6 +1026,9 @@ if __name__ == "__main__":
     # test_runner.test_resnet50_keras_ingestion(target="opencl --device=mali")
     # test_runner.run_pending_benchmarks()
 
+    # test_runner.test_resnet50_tf_ingestion(target="opencl --device=mali") # 0.42 s
+    # test_runner.run_pending_benchmarks()
+
     #test_runner.test_vgg16_keras_ingestion(target="opencl --device=mali")
     #test_runner.run_pending_benchmarks()
     #test_runner.test_vgg16_keras_ingestion(target="opencl --device=mali", dtype='float16')
@@ -879,3 +1036,37 @@ if __name__ == "__main__":
 
     # test_runner.test_deeplabv3_tflite_ingestion(target="opencl --device=mali")
     # test_runner.run_pending_benchmarks()
+
+    # # deeplabv3 autotuning
+    # test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype="float32")
+    # opt = tuning_options
+    # opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
+    # #test_runner.tune_pending_benchmarks(opt=opt)
+    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    # test_runner.run_pending_benchmarks()
+
+    # deeplabv3 autotuning fp16
+    #test_runner.test_deeplabv3_onnx_ingestion(target="opencl --device=mali", dtype="float16")
+    #opt = tuning_options
+    #opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
+    #test_runner.tune_pending_benchmarks(opt=opt)
+    #test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
+    #test_runner.run_pending_benchmarks()
+
+    # mobilenetv3-ssdlite autotuning fp32
+    #test_runner.test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(target="opencl --device=mali", dtype="float32")
+    # opt = tuning_options
+    # opt['log_filename'] = 'mobilenetv3-ssdlite.fp32.autotvm.log'
+    # test_runner.tune_pending_benchmarks(opt=opt)
+    #test_runner.run_pending_benchmarks()
+
+    # mobilenetv3-ssdlite autotuning fp16
+    #test_runner.test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(target="opencl --device=mali", dtype="float16")
+    test_runner.test_mobilenetv3_ssdlite_pytorch_onnx_ingestion(target="llvm", dtype="float16")
+    opt = tuning_options
+    opt['log_filename'] = 'mobilenetv3-ssdlite.fp16.autotvm.log'
+    test_runner.tune_pending_benchmarks(opt=opt)
+    test_runner.run_pending_benchmarks()
+
+    # opt['log_filename'] = 'mobilenetv1_gluon_fp32_autotvm_tuning.log'
+    # test_runner.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
