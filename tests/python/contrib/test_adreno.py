@@ -161,7 +161,6 @@ def downcast_fp16(func, module):
 
         return ret
 
-    import ipdb; ipdb.set_trace()
     func = infer_type(func, module)
     downcast_pass = DowncastMutator()
     func = downcast_pass.visit(func)
@@ -602,10 +601,9 @@ class Executor(object):
 
     def import_resnet50(self, target="llvm", dtype='float32'):
         model, input_shape = gluon_model("resnet50_v1", batch_size=1)
-        if dtype != 'float32':
-            model.cast(dtype)
-            model.hybridize()
         mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
+        if dtype == 'float16':
+            mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def _import_resnet50_tf(self, target="llvm", dtype='float32'):
@@ -636,16 +634,13 @@ class Executor(object):
     def _import_inceptionv3_gluon(self, target="llvm", dtype='float32'):
         model, input_shape = gluon_model("inceptionv3", batch_size=1)
         if dtype != 'float32':
-            model.cast(dtype)
-            model.hybridize()
         mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
+        if dtype == 'float16':
+            mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def import_mobilenetv1(self, target="llvm", dtype='float32'):
         model, input_shape = gluon_model("mobilenet1.0", batch_size=1)
-        # if dtype != 'float32':
-        #     model.cast(dtype)
-        #     model.hybridize()
         mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
@@ -661,10 +656,9 @@ class Executor(object):
 
     def import_vgg16(self, target="llvm", dtype='float32'):
         model, input_shape = gluon_model("vgg16", batch_size=1)
-        if dtype != 'float32':
-            model.cast(dtype)
-            model.hybridize()
-        mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape}, dtype=dtype)
+        mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
+        if dtype == 'float16':
+            mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
 
