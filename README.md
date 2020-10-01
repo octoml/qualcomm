@@ -1,6 +1,6 @@
 # Qualcomm TVM Evaluation Repo
 
-Last version of TVM this was evaluated on and worked: `c549239b9248371ca3eeabcd99e05e5e406fd43e`
+Last version of TVM this was evaluated on and worked (10/1/2020): `c549239b9248371ca3eeabcd99e05e5e406fd43e`
 
 Questions of issues using the scripts? Submit a ticket via the OctoML [helpdesk](https://octoml.atlassian.net/servicedesk/customer/portal/6).
 
@@ -89,3 +89,6 @@ optional arguments:
   --debug DEBUG         Use graph runtime debugger to output per layer perf.
                         data and other statistics
 ```
+
+## Known issues ##
+Currently running with `-m deeplabv3 -t float16` will produce an internal invariant violation in TVM. This is known and under investigation.
