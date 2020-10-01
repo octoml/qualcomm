@@ -681,7 +681,7 @@ class Executor(object):
         model = onnx.load_model(graph_file)
         input_shape = (1, 3, 300, 300)
         input_names, input_shape = get_input_data_shape_dict(model, input_shape)
-        mod, params = relay.frontend.from_onnx(model, input_shape, opset=11)
+        mod, params = relay.frontend.from_onnx(model, input_shape, opset=9)
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
@@ -725,7 +725,6 @@ class Executor(object):
         input_names, shape_dict = get_input_data_shape_dict(model, input_shape["ImageTensor:0"])
         mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11)
         if dtype == 'float16':
-            import ipdb; ipdb.set_trace()
             mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
