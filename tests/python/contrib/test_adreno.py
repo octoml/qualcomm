@@ -46,7 +46,7 @@ except ImportError:
 def get_args():
     import argparse
     parser = argparse.ArgumentParser(description="Tune and/or evaluate a curated set of models")
-    models = ['resnet50', 'mobilenetv1', 'inceptionv3', 'vgg16', 'mobilenetv3-ssdlite', 'deeplabv3']
+    models = ['resnet50', 'mobilenetv1', 'inceptionv3', 'vgg16', 'mobilenetv3_ssdlite', 'deeplabv3']
     parser.add_argument('-m', '--model', type=str, default=None, required=True, help="Model to tune and/or evaluate", choices=models)
     parser.add_argument('-t', '--type', type=str, default="float32", choices=['float32', 'float16'], help="Specify whether the model should be run with single or half precision floating point values")
     parser.add_argument('-l', '--log', type=str, default=None, help="AutoTVM tuning logfile name")
@@ -200,16 +200,16 @@ def get_output_nodes_from_graph_def(graph_def):
             outputs.append(op.name)
     return inputs, outputs
 
-def get_input_data_shape_dict(graph_def, input_data):
-    if isinstance(input_data, list):
+def get_input_data_shape_dict(graph_def, input_shape):
+    if isinstance(input_shape, list):
         input_names = {}
         shape_dict = {}
-        for i, _ in enumerate(input_data):
+        for i in range(len(input_shape)):
             input_names[i] = graph_def.graph.input[i].name
-            shape_dict[input_names[i]] = input_data[i].shape
+            shape_dict[input_names[i]] = input_shape[i]
     else:
         input_names = graph_def.graph.input[0].name
-        shape_dict = {input_names: input_data.shape}
+        shape_dict = {input_names: input_shape}
 
     return input_names, shape_dict
 
@@ -505,6 +505,7 @@ class Executor(object):
         for method in inspect.getmembers(Executor):
             if "import_" + model == method[0]:
                 return method[1](self, *args, **kwargs)
+        raise ValueError("import_" + model + " not found.")
 
     def __init__(self, use_tracker=False):
         self.benchmarks = []
@@ -618,8 +619,7 @@ class Executor(object):
         graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/mxnet_resnet50_v1_fp16.onnx")
         model = onnx.load_model(graph_file)
         input_shape = {"data": (1,3,224,224)}
-        data = np.random.uniform(size=input_shape["data"]).astype(dtype)
-        input_names, shape_dict = get_input_data_shape_dict(model, data)
+        input_names, shape_dict = get_input_data_shape_dict(model, input_shape["data"])
         mod, params = relay.frontend.from_onnx(model, shape_dict, opset=7)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
@@ -633,7 +633,6 @@ class Executor(object):
 
     def _import_inceptionv3_gluon(self, target="llvm", dtype='float32'):
         model, input_shape = gluon_model("inceptionv3", batch_size=1)
-        if dtype != 'float32':
         mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
@@ -678,19 +677,10 @@ class Executor(object):
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def import_mobilenetv3_ssdlite(self, target="llvm", dtype='float32'):
-        # import tf2onnx
-        # graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ft_graph_2.pb")
-        # graph_def = tf_importer.get_workload(graph_file)
-        # graph_def = tf_importer.ProcessGraphDefParam(graph_def)
-        # with tf.Graph().as_default():
-        #     tf.import_graph_def(graph_def, name="")
-        #     with tf.Session() as sess:
-        #         model = tf2onnx.tfonnx.process_tf_graph(sess.graph, input_names=['input.1:0'], output_names=['scores:0', 'boxes:0'])
-
-        graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/mb3-ssd_2.onnx")
+        graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ssd-mobilenetV3-pytorch/mb3-ssd.onnx")
         model = onnx.load_model(graph_file)
-        data = np.random.uniform(size=(1, 3, 300, 300)).astype(dtype)
-        input_names, input_shape = get_input_data_shape_dict(model, data)
+        input_shape = (1, 3, 300, 300)
+        input_names, input_shape = get_input_data_shape_dict(model, input_shape)
         mod, params = relay.frontend.from_onnx(model, input_shape, opset=11)
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
@@ -732,8 +722,7 @@ class Executor(object):
         graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
         model = onnx.load_model(graph_file)
         input_shape = {"ImageTensor:0": (1,224,224,3)}
-        data = np.random.uniform(size=input_shape["ImageTensor:0"]).astype(dtype)
-        input_names, shape_dict = get_input_data_shape_dict(model, data)
+        input_names, shape_dict = get_input_data_shape_dict(model, input_shape["ImageTensor:0"])
         mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11)
         if dtype == 'float16':
             import ipdb; ipdb.set_trace()
@@ -741,18 +730,12 @@ class Executor(object):
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def import_inceptionv3(self, target="llvm", dtype='float32'):
-        if dtype == 'float32':
-            graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/inception_v3_2016_08_28_frozen_opt.pb"))
-            #tf.train.write_graph(graph_def, "./",name="inceptionv3.pbtxt")
-        elif dtype == 'float16':
-            graph_def = convert_to_fp16(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/inception_v3_2016_08_28_frozen_opt.pb"), input_name='input',output_names=['InceptionV3/Predictions/Reshape_1'])
-            #tf.train.write_graph(graph_def, "./",name="inceptionv3_fp16.pbtxt")
-        else:
-            raise "Only fp32/16 are supported"
+        graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/inception_v3_2016_08_28_frozen_opt.pb"))
         graph_def = tf_importer.ProcessGraphDefParam(graph_def)
         input_shape = {"input": (1,299,299,3)}
-        #mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape)
         mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
+        if dtype == 'float16':
+            mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def _import_mobilenetv1_tf(self, target="llvm"):
@@ -806,9 +789,9 @@ class Executor(object):
     def _import_mobilenetv1_onnx(self, target="llvm"):
         graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ssd_mnv1.op10.onnx")
         model = onnx.load_model(graph_file)
-        data = np.random.uniform(size=(1, 3, 224, 224)).astype('float32')
-        input_names, shape_dict = get_input_data_shape_dict(model, data)
-        mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11)
+        input_shape = (1, 3, 224, 224)
+        input_names, input_shape = get_input_data_shape_dict(model, input_shape)
+        mod, params = relay.frontend.from_onnx(model, input_shape, opset=11)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
 
