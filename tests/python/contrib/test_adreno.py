@@ -15,33 +15,10 @@
 # specific language governing permissions and limitations
 # under the License.
 import os
+import tvm
+from tvm import relay
 from tvm import autotvm
 from tvm.contrib import util, ndk
-
-import numpy as np
-import mxnet.gluon as gluon
-import tvm
-from tvm import te
-from tvm import relay
-try:
-    import tensorflow.compat.v1 as tf
-except ImportError:
-    import tensorflow as tf
-#from compare_with_tf import *
-import onnx
-import onnxruntime
-
-import tvm.relay.testing.tf as tf_importer
-from tvm.autotvm.tuner import XGBTuner
-from tvm.autotvm.tuner import GATuner
-
-#from tvm.contrib.debugger import debug_runtime as graph_runtime
-from tvm.contrib import graph_runtime
-
-try:
-    from tensorflow import lite as interpreter_wrapper
-except ImportError:
-    from tensorflow.contrib import lite as interpreter_wrapper
 
 def get_args():
     import argparse
@@ -55,6 +32,7 @@ def get_args():
     parser.add_argument('-p', '--rpc_tracker_port', type=str, default=os.environ["TVM_TRACKER_PORT"], help="RPC tracker host port")
     parser.add_argument('-T', '--target', type=str, default="opencl --device=mali", help="Compilation target")
     parser.add_argument('--tune', type=bool, default=False, help="Whether or not to run autotuning")
+    parser.add_argument('--debug', type=bool, default=False, help="Use graph runtime debugger to output per layer perf. data and other statistics")
 
     args = parser.parse_args()
     if args.log == None:
@@ -105,10 +83,10 @@ def downcast_fp16(func, module):
         def visit_call(self, call):
             dtype = 'float32' if call.op.name in filter_list else 'float16'
             new_fn = self.visit(call.op)
-            # Collec the original dtypes
+            # Collect the original dtypes
             type_list = []
             if call.op.name in filter_list:
-                # For nms
+                # For NMS
                 for arg in call.args:
                     if isinstance(arg, TupleGetItem) and isinstance(arg.tuple_value, Call):
                         tuple_types = arg.tuple_value.checked_type.fields
@@ -183,6 +161,7 @@ def get_input_data_shape_dict(graph_def, input_shape):
     return input_names, shape_dict
 
 def gluon_model(name, batch_size=None):
+    import mxnet.gluon as gluon
     model = gluon.model_zoo.vision.get_model(name, pretrained=True)
     if "resnet50_v1" or "mobilenet1.0" in name:
         data_shape = (batch_size, 3, 224, 224)
@@ -232,6 +211,11 @@ class Executor(object):
         self.tracker = None
 
     def _benchmark(self,tvm_mod, params, input_shape, target='llvm', target_host="llvm", dtype='float32'):
+        if args.debug:
+            from tvm.contrib.debugger import debug_runtime as graph_runtime
+        else:
+            from tvm.contrib import graph_runtime
+
         if self.use_tracker and self.remote == None:
             self._connect_tracker()
 
@@ -261,6 +245,8 @@ class Executor(object):
             input_shape = input_shape[key]
         else:
             key = 'data'
+
+        import numpy as np
         m.set_input(**params)
         m.set_input(key, np.random.normal(size=input_shape).astype(dtype))
         print("Evaluating...")
@@ -296,6 +282,8 @@ class Executor(object):
                    early_stopping=None,
                    log_filename='tuning.log',
                    use_transfer_learning=True):
+        from tvm.autotvm.tuner import XGBTuner
+        from tvm.autotvm.tuner import GATuner
         tmp_log_file = log_filename + ".tmp"
         if os.path.exists(tmp_log_file):
             os.remove(tmp_log_file)
@@ -362,6 +350,7 @@ class ModelImporter(object):
         return (mod, params, input_shape, dtype, target)
 
     def import_mobilenetv3_ssdlite(self, target="llvm", dtype='float32'):
+        import onnx
         graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ssd-mobilenetV3-pytorch/mb3-ssd.onnx")
         model = onnx.load_model(graph_file)
         input_shape = (1, 3, 300, 300)
@@ -372,6 +361,7 @@ class ModelImporter(object):
         return (mod, params, input_shape, dtype, target)
 
     def import_deeplabv3(self, target="llvm", dtype='float32'):
+        import onnx
         graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
         model = onnx.load_model(graph_file)
         input_shape = {"ImageTensor:0": (1,224,224,3)}
@@ -382,6 +372,7 @@ class ModelImporter(object):
         return (mod, params, input_shape, dtype, target)
 
     def import_inceptionv3(self, target="llvm", dtype='float32'):
+        import tvm.relay.testing.tf as tf_importer
         graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/inception_v3_2016_08_28_frozen_opt.pb"))
         graph_def = tf_importer.ProcessGraphDefParam(graph_def)
         input_shape = {"input": (1,299,299,3)}
