@@ -89,7 +89,6 @@ def downcast_fp16(func, module):
     from tvm.relay import cast
     from tvm.ir import IRModule
     from tvm.relay import function as _function
-    # pylint: disable=line-too-long
     """Downcast to fp16 mutator
     Parameters
     ---------
@@ -100,7 +99,6 @@ def downcast_fp16(func, module):
     -------
     The graph after dowmcasting to half-precision floating-point.
     """
-    # get_valid_counts and non_max_suppression does not support fp16 so we create a filter list for them
     filter_list = ['vision.get_valid_counts', 'vision.non_max_suppression']
     class DowncastMutator(ExprMutator):
         """Downcast to fp16 mutator"""
@@ -196,13 +194,6 @@ def gluon_model(name, batch_size=None):
     return model, data_shape
 
 class Executor(object):
-    def schedule(self, model, *args, **kwargs):
-        import inspect
-        for method in inspect.getmembers(Executor):
-            if "import_" + model == method[0]:
-                return method[1](self, *args, **kwargs)
-        raise ValueError("import_" + model + " not found.")
-
     def __init__(self, use_tracker=False):
         self.benchmarks = []
         self.tuning_jobs = []
@@ -216,16 +207,10 @@ class Executor(object):
             class BackendNotImplementedForRPCBenchmarking(Exception):
                 pass
             raise BackendNotImplementedForRPCBenchmarking
-    def connect_tracker(self):
-        from tvm import rpc
-        print("Tracker attempting connection on {}:{}".format(args.rpc_tracker_host, args.rpc_tracker_port))
-        self.tracker = rpc.connect_tracker(args.rpc_tracker_host, args.rpc_tracker_port)
-        self.remote = self.tracker.request(args.rpc_key, priority=0,session_timeout=600)
-        print("Tracker connected to remote RPC server")
 
-    def disconnect_tracker(self):
-        self.remote = None
-        self.tracker = None
+    def schedule(self, model, *args, **kwargs):
+        importer = ModelImporter()
+        self._schedule_jobs(*importer(model, *args, **kwargs))
 
     def run_pending_benchmarks(self):
         for bench in self.benchmarks:
@@ -235,14 +220,23 @@ class Executor(object):
         for tune in self.tuning_jobs:
             tune(apply_previous_tune, options=args.tuning_options)
 
-    def benchmark(self,tvm_mod, params, input_shape, target='llvm', target_host="llvm", dtype='float32'):
+    def _connect_tracker(self):
+        from tvm import rpc
+        print("Tracker attempting connection on {}:{}".format(args.rpc_tracker_host, args.rpc_tracker_port))
+        self.tracker = rpc.connect_tracker(args.rpc_tracker_host, args.rpc_tracker_port)
+        self.remote = self.tracker.request(args.rpc_key, priority=0,session_timeout=600)
+        print("Tracker connected to remote RPC server")
+
+    def _disconnect_tracker(self):
+        self.remote = None
+        self.tracker = None
+
+    def _benchmark(self,tvm_mod, params, input_shape, target='llvm', target_host="llvm", dtype='float32'):
         if self.use_tracker and self.remote == None:
-            self.connect_tracker()
+            self._connect_tracker()
 
         with relay.build_config(opt_level=3):
             graph, lib, params = relay.build(tvm_mod, target_host=target_host, target=target, params=params)
-            #lib.save("./host.ll")
-            #lib.imported_modules[0].save("./device.cl")
 
         if self.remote:
             print('Using Android OpenCL runtime over RPC')
@@ -272,13 +266,11 @@ class Executor(object):
         print("Evaluating...")
         time_f = m.module.time_evaluator("run", ctx, number=10)
         cost = time_f().mean
-        #prof_res = np.array(time_f().results) * 1000  # milliseconds
-        #print("%-20s %-19s (%s)" % (network, "%.2f ms" % np.mean(prof_res), "%.2f ms" % np.std(prof_res)))
         print('%g secs/iteration\n' % cost)
 
-    def schedule_jobs(self, mod, params, input_shape, dtype, target):
+    def _schedule_jobs(self, mod, params, input_shape, dtype, target):
         def bench():
-            self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target, dtype=dtype)
+            self._benchmark(mod, params, input_shape, target=target, target_host=self.host_target, dtype=dtype)
         benchmark_index = len(self.benchmarks)
         self.benchmarks.append(bench)
         def tune(apply_previous_tune=False, options=args.tuning_options):
@@ -286,36 +278,88 @@ class Executor(object):
             tasks = autotvm.task.extract_from_program(mod["main"], target=target, target_host=self.host_target, params=params)
             if apply_previous_tune == False:
                 print("Tuning kernels")
-                tune_tasks(tasks, **options)
+                Executor.tune_tasks(tasks, **options)
 
             def tuned_benchmark():
                 print ("Apply best performing tuning profiles:")
                 with autotvm.apply_history_best(options["log_filename"]):
-                    self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
+                    self._benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
             self.benchmarks.pop(benchmark_index)
             self.benchmarks.append(tuned_benchmark)
         self.tuning_jobs.append(tune)
+
+    @staticmethod
+    def tune_tasks(tasks,
+                   measure_option,
+                   tuner='xgb',
+                   n_trial=1024,
+                   early_stopping=None,
+                   log_filename='tuning.log',
+                   use_transfer_learning=True):
+        tmp_log_file = log_filename + ".tmp"
+        if os.path.exists(tmp_log_file):
+            os.remove(tmp_log_file)
+
+        for i, tsk in enumerate(reversed(tasks)):
+            prefix = "[Task %2d/%2d] " % (i+1, len(tasks))
+            if tuner == 'xgb' or tuner == 'xgb-rank':
+                tuner_obj = XGBTuner(tsk, loss_type='rank')
+            elif tuner == 'xgb_knob':
+                tuner_obj = XGBTuner(tsk, loss_type='rank', feature_type='knob')
+            elif tuner == 'ga':
+                tuner_obj = GATuner(tsk, pop_size=50)
+            elif tuner == 'random':
+                tuner_obj = RandomTuner(tsk)
+            elif tuner == 'gridsearch':
+                tuner_obj = GridSearchTuner(tsk)
+            else:
+                raise ValueError("Invalid tuner: " + tuner)
+
+            if use_transfer_learning:
+                if os.path.isfile(tmp_log_file):
+                    tuner_obj.load_history(autotvm.record.load_from_file(tmp_log_file))
+
+            tsk_trial = min(n_trial, len(tsk.config_space))
+            tuner_obj.tune(n_trial=tsk_trial,
+                           early_stopping=early_stopping,
+                           measure_option=measure_option,
+                           callbacks=[
+                               autotvm.callback.progress_bar(tsk_trial, prefix=prefix),
+                               autotvm.callback.log_to_file(tmp_log_file)
+                           ])
+
+        autotvm.record.pick_best(tmp_log_file, log_filename)
+        os.remove(tmp_log_file)
+
+
+class ModelImporter(object):
+    def __call__(self, model, *args, **kwargs):
+        import inspect
+        for method in inspect.getmembers(type(self)):
+            if "import_" + model == method[0]:
+                return method[1](self, *args, **kwargs)
+        raise ValueError("import_" + model + " not found.")
 
     def import_resnet50(self, target="llvm", dtype='float32'):
         model, input_shape = gluon_model("resnet50_v1", batch_size=1)
         mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
-        self.schedule_jobs(mod, params, input_shape, dtype, target)
+        return (mod, params, input_shape, dtype, target)
 
     def import_mobilenetv1(self, target="llvm", dtype='float32'):
         model, input_shape = gluon_model("mobilenet1.0", batch_size=1)
         mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
-        self.schedule_jobs(mod, params, input_shape, dtype, target)
+        return (mod, params, input_shape, dtype, target)
 
     def import_vgg16(self, target="llvm", dtype='float32'):
         model, input_shape = gluon_model("vgg16", batch_size=1)
         mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
-        self.schedule_jobs(mod, params, input_shape, dtype, target)
+        return (mod, params, input_shape, dtype, target)
 
     def import_mobilenetv3_ssdlite(self, target="llvm", dtype='float32'):
         graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ssd-mobilenetV3-pytorch/mb3-ssd.onnx")
@@ -325,7 +369,7 @@ class Executor(object):
         mod, params = relay.frontend.from_onnx(model, input_shape, opset=9)
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
-        self.schedule_jobs(mod, params, input_shape, dtype, target)
+        return (mod, params, input_shape, dtype, target)
 
     def import_deeplabv3(self, target="llvm", dtype='float32'):
         graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
@@ -335,7 +379,7 @@ class Executor(object):
         mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11)
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
-        self.schedule_jobs(mod, params, input_shape, dtype, target)
+        return (mod, params, input_shape, dtype, target)
 
     def import_inceptionv3(self, target="llvm", dtype='float32'):
         graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/inception_v3_2016_08_28_frozen_opt.pb"))
@@ -344,54 +388,7 @@ class Executor(object):
         mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
-        self.schedule_jobs(mod, params, input_shape, dtype, target)
-
-def tune_tasks(tasks,
-               measure_option,
-               tuner='xgb',
-               n_trial=1024,
-               early_stopping=None,
-               log_filename='tuning.log',
-               use_transfer_learning=True):
-    # create tmp log file
-    tmp_log_file = log_filename + ".tmp"
-    if os.path.exists(tmp_log_file):
-        os.remove(tmp_log_file)
-
-    for i, tsk in enumerate(reversed(tasks)):
-        prefix = "[Task %2d/%2d] " % (i+1, len(tasks))
-        # create tuner
-        if tuner == 'xgb' or tuner == 'xgb-rank':
-            tuner_obj = XGBTuner(tsk, loss_type='rank')
-        elif tuner == 'xgb_knob':
-            tuner_obj = XGBTuner(tsk, loss_type='rank', feature_type='knob')
-        elif tuner == 'ga':
-            tuner_obj = GATuner(tsk, pop_size=50)
-        elif tuner == 'random':
-            tuner_obj = RandomTuner(tsk)
-        elif tuner == 'gridsearch':
-            tuner_obj = GridSearchTuner(tsk)
-        else:
-            raise ValueError("Invalid tuner: " + tuner)
-
-        if use_transfer_learning:
-            if os.path.isfile(tmp_log_file):
-                tuner_obj.load_history(autotvm.record.load_from_file(tmp_log_file))
-
-        # do tuning
-        tsk_trial = min(n_trial, len(tsk.config_space))
-        tuner_obj.tune(n_trial=tsk_trial,
-                       early_stopping=early_stopping,
-                       measure_option=measure_option,
-                       callbacks=[
-                           autotvm.callback.progress_bar(tsk_trial, prefix=prefix),
-                           autotvm.callback.log_to_file(tmp_log_file)
-                       ])
-
-    # pick best records to a cache file
-    autotvm.record.pick_best(tmp_log_file, log_filename)
-    os.remove(tmp_log_file)
-
+        return (mod, params, input_shape, dtype, target)
 
 if __name__ == "__main__":
     main()
