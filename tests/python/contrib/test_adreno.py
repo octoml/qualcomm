@@ -15,6 +15,9 @@
 # specific language governing permissions and limitations
 # under the License.
 import os
+from tvm import autotvm
+from tvm.contrib import util, ndk
+
 import numpy as np
 import mxnet.gluon as gluon
 import tvm
@@ -29,48 +32,55 @@ import onnx
 import onnxruntime
 
 import tvm.relay.testing.tf as tf_importer
-from tvm import autotvm
 from tvm.autotvm.tuner import XGBTuner
 from tvm.autotvm.tuner import GATuner
 
 #from tvm.contrib.debugger import debug_runtime as graph_runtime
 from tvm.contrib import graph_runtime
-from tvm.contrib import util, ndk
 
 try:
     from tensorflow import lite as interpreter_wrapper
 except ImportError:
     from tensorflow.contrib import lite as interpreter_wrapper
 
-import argparse
-parser = argparse.ArgumentParser(description="Tune and/or evaluate a curated set of models")
-models = ['resnet50', 'mobilenetv1', 'inceptionv3', 'vgg16', 'mobilenetv3-ssdlite', 'deeplabv3']
-parser.add_argument('-m', '--model', type=str, default=None, required=True, help="Model to tune and/or evaluate", choices=models)
-parser.add_argument('-t', '--type', type=str, default="float32", choices=['float32', 'float16'], help="Specify whether the model should be run with single or half precision floating point values")
-parser.add_argument('-l', '--log', type=str, default=None, help="AutoTVM tuning logfile name")
-parser.add_argument('-k', '--rpc_key', type=str, default="android", help="RPC key to use")
-parser.add_argument('-r', '--rpc_tracker_host', type=str, default=os.environ["TVM_TRACKER_HOST"], help="RPC tracker host IP address")
-parser.add_argument('-p', '--rpc_tracker_port', type=str, default=os.environ["TVM_TRACKER_PORT"], help="RPC tracker host port")
-parser.add_argument('-T', '--target', type=str, default="opencl --device=mali", help="Compilation target")
-parser.add_argument('--tune', type=bool, default=False, help="Whether or not to run autotuning")
-
 def get_args():
+    import argparse
+    parser = argparse.ArgumentParser(description="Tune and/or evaluate a curated set of models")
+    models = ['resnet50', 'mobilenetv1', 'inceptionv3', 'vgg16', 'mobilenetv3-ssdlite', 'deeplabv3']
+    parser.add_argument('-m', '--model', type=str, default=None, required=True, help="Model to tune and/or evaluate", choices=models)
+    parser.add_argument('-t', '--type', type=str, default="float32", choices=['float32', 'float16'], help="Specify whether the model should be run with single or half precision floating point values")
+    parser.add_argument('-l', '--log', type=str, default=None, help="AutoTVM tuning logfile name")
+    parser.add_argument('-k', '--rpc_key', type=str, default="android", help="RPC key to use")
+    parser.add_argument('-r', '--rpc_tracker_host', type=str, default=os.environ["TVM_TRACKER_HOST"], help="RPC tracker host IP address")
+    parser.add_argument('-p', '--rpc_tracker_port', type=str, default=os.environ["TVM_TRACKER_PORT"], help="RPC tracker host port")
+    parser.add_argument('-T', '--target', type=str, default="opencl --device=mali", help="Compilation target")
+    parser.add_argument('--tune', type=bool, default=False, help="Whether or not to run autotuning")
+
     args = parser.parse_args()
     if args.log == None:
         args.log = "logs/" + args.model + "." + args.type + ".autotvm.log"
-    return args
-args = get_args()
-device_key = args.rpc_key
-tracker_host = args.rpc_tracker_host
-tracker_port = int(args.rpc_tracker_port)
-tuning_options = {
+    if args.rpc_tracker_port != None:
+        args.rpc_tracker_port = int(args.rpc_tracker_port)
+    args.tuning_options = {
     'log_filename': args.log,
     'early_stopping': None,
     'measure_option': autotvm.measure_option(
         builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=1000),
-        runner=autotvm.RPCRunner(device_key, host=tracker_host, port=tracker_port, number=5, timeout=1000),
+        runner=autotvm.RPCRunner(args.rpc_key, host=args.rpc_tracker_host, port=args.rpc_tracker_port, number=5, timeout=1000),
     ),
-}
+    }
+    return args
+
+args = get_args()
+
+def main():
+    executor = Executor(use_tracker="android")
+    executor.schedule(args.model, target=args.target, dtype=args.type)
+    if args.tune:
+        executor.tune_pending_benchmarks()
+    else:
+        executor.tune_pending_benchmarks(apply_previous_tune=True)
+    executor.run_pending_benchmarks()
 
 def downcast_fp16(func, module):
     from tvm.relay.expr_functor import ExprMutator
@@ -479,15 +489,14 @@ def convert_to_fp16(path_to_model, input_name, output_names, target_type='fp16',
 
     return convert_graph_to_fp16(path_to_model, input_name=input_name, output_names=output_names, target_type=target_type)
 
-def get_network(name, batch_size=None, is_gluon_model=True):
-    if is_gluon_model:
-        model = gluon.model_zoo.vision.get_model(name, pretrained=True)
+def gluon_model(name, batch_size=None):
+    model = gluon.model_zoo.vision.get_model(name, pretrained=True)
     if "resnet50_v1" or "mobilenet1.0" in name:
         data_shape = (batch_size, 3, 224, 224)
     elif "inception" in name:
         data_shape = (batch_size, 3, 299, 299)
     else:
-        raise ValueError("Unsupported network: " + name)
+        raise ValueError("Input shape unknown for gluon model: " + name)
 
     return model, data_shape
 
@@ -513,9 +522,9 @@ class Executor(object):
             raise BackendNotImplementedForRPCBenchmarking
     def connect_tracker(self):
         from tvm import rpc
-        print("Tracker attempting connection on {}:{}".format(tracker_host, tracker_port))
-        self.tracker = rpc.connect_tracker(tracker_host, tracker_port)
-        self.remote = self.tracker.request(device_key, priority=0,session_timeout=600)
+        print("Tracker attempting connection on {}:{}".format(args.rpc_tracker_host, args.rpc_tracker_port))
+        self.tracker = rpc.connect_tracker(args.rpc_tracker_host, args.rpc_tracker_port)
+        self.remote = self.tracker.request(args.rpc_key, priority=0,session_timeout=600)
         print("Tracker connected to remote RPC server")
 
     def disconnect_tracker(self):
@@ -526,9 +535,9 @@ class Executor(object):
         for bench in self.benchmarks:
             bench()
 
-    def tune_pending_benchmarks(self, apply_previous_tune=False, opt=tuning_options):
+    def tune_pending_benchmarks(self, apply_previous_tune=False, opt=args.tuning_options):
         for tune in self.tuning_jobs:
-            tune(apply_previous_tune, options=tuning_options)
+            tune(apply_previous_tune, options=args.tuning_options)
 
     def benchmark(self,tvm_mod, params, input_shape, target='llvm', target_host="llvm", dtype='float32'):
         if self.use_tracker and self.remote == None:
@@ -576,7 +585,7 @@ class Executor(object):
             self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target, dtype=dtype)
         benchmark_index = len(self.benchmarks)
         self.benchmarks.append(bench)
-        def tune(apply_previous_tune=False, options=tuning_options):
+        def tune(apply_previous_tune=False, options=args.tuning_options):
             print("Extracting tasks")
             tasks = autotvm.task.extract_from_program(mod["main"], target=target, target_host=self.host_target, params=params)
             if apply_previous_tune == False:
@@ -592,12 +601,11 @@ class Executor(object):
         self.tuning_jobs.append(tune)
 
     def import_resnet50(self, target="llvm", dtype='float32'):
-        import ipdb; ipdb.set_trace()
-        gluon_model, input_shape = get_network("resnet50_v1", batch_size=1)
+        model, input_shape = gluon_model("resnet50_v1", batch_size=1)
         if dtype != 'float32':
-            gluon_model.cast(dtype)
-            gluon_model.hybridize()
-        mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
+            model.cast(dtype)
+            model.hybridize()
+        mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def _import_resnet50_tf(self, target="llvm", dtype='float32'):
@@ -626,19 +634,19 @@ class Executor(object):
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def _import_inceptionv3_gluon(self, target="llvm", dtype='float32'):
-        gluon_model, input_shape = get_network("inceptionv3", batch_size=1)
+        model, input_shape = gluon_model("inceptionv3", batch_size=1)
         if dtype != 'float32':
-            gluon_model.cast(dtype)
-            gluon_model.hybridize()
-        mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
+            model.cast(dtype)
+            model.hybridize()
+        mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def import_mobilenetv1(self, target="llvm", dtype='float32'):
-        gluon_model, input_shape = get_network("mobilenet1.0", batch_size=1)
+        model, input_shape = gluon_model("mobilenet1.0", batch_size=1)
         # if dtype != 'float32':
-        #     gluon_model.cast(dtype)
-        #     gluon_model.hybridize()
-        mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
+        #     model.cast(dtype)
+        #     model.hybridize()
+        mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
         if dtype == 'float16':
             mod = downcast_fp16(mod["main"], mod)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
@@ -652,17 +660,17 @@ class Executor(object):
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
     def import_vgg16(self, target="llvm", dtype='float32'):
-        gluon_model, input_shape = get_network("vgg16", batch_size=1)
+        model, input_shape = gluon_model("vgg16", batch_size=1)
         if dtype != 'float32':
-            gluon_model.cast(dtype)
-            gluon_model.hybridize()
-        mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape}, dtype=dtype)
+            model.cast(dtype)
+            model.hybridize()
+        mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape}, dtype=dtype)
         self.schedule_jobs(mod, params, input_shape, dtype, target)
 
 
     def _import_vgg16bn(self, target="llvm", dtype='float32'):
-        gluon_model, input_shape = get_network("vgg16_bn", batch_size=1)
-        mod, params = relay.frontend.from_mxnet(gluon_model, {"data" : input_shape})
+        model, input_shape = gluon_model("vgg16_bn", batch_size=1)
+        mod, params = relay.frontend.from_mxnet(model, {"data" : input_shape})
         self.benchmark(mod, params, input_shape, target=target, target_host=self.host_target)
 
     def _import_mobilenetv3_ssdlite_tf(self, target="llvm", dtype='float32'):
@@ -858,121 +866,4 @@ def tune_tasks(tasks,
 
 
 if __name__ == "__main__":
-    executor = Executor(use_tracker="android")
-    executor.schedule(args.model, target=args.target, dtype=args.type)
-    if args.tune:
-        executor.tune_pending_benchmarks()
-    else:
-        executor.tune_pending_benchmarks(apply_previous_tune=True)
-    executor.run_pending_benchmarks()
-
-
-    # executor.test_resnet50_ingestion(target="opencl --device=mali", dtype='float32')
-    # opt = tuning_options
-    # opt['log_filename'] = 'resnet50.fp32.autotvm.log'
-    # # executor.tune_pending_benchmarks(opt=opt)
-    # executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    # executor.run_pending_benchmarks()
-
-
-    # if args.model == "resnet50":
-    #     executor.import_resnet50(target="opencl --device=mali", dtype='float32')
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'resnet50.fp32.autotvm.log'
-    #     # executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-    #     # resnet50 autotuning (fp16)
-    #     executor.import_resnet50(target="opencl --device=mali", dtype='float16')
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'resnet50.fp16.autotvm.log'
-    #     # executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-    # # mobilenetv1 (fp32)
-    # if args.model == "mobilenetv1":
-    #     executor.import_mobilenetv1(target="opencl --device=mali",dtype='float32')
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'mobilenetv1_fp32_autotvm_tuning.log'
-    #     # executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-    #     # mobilenetv1 (fp16)
-    #     executor.import_mobilenetv1(target="opencl --device=mali",dtype='float16')
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'mobilenetv1_fp16_autotvm_tuning.log'
-    #     # executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-    # # inceptionv3 autotuning (fp32)
-    # if args.model == "inceptionv3":
-    #     executor.import_inceptionv3_tf(target="opencl --device=mali", dtype='float32')
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'inceptionv3.fp32.autotvm.log'
-    #     #executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-    #     # inceptionv3 autotuning (fp16)
-    #     executor.import_inceptionv3_tf(target="opencl --device=mali", dtype='float16')
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'inceptionv3.fp16.autotvm.log'
-    #     #executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-    # # vgg16 autotuning (fp32)
-    # if args.model == "vgg16":
-    #     executor.import_vgg16(target="opencl --device=mali", dtype='float32')
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'vgg16.fp32.autotvm.log'
-    #     #executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-    #     # vgg16 autotuning (fp16)
-    #     executor.import_vgg16(target="opencl --device=mali", dtype='float16')
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'vgg16.fp16.autotvm.log'
-    #     #executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-
-    # # mobilenetv3-ssdlite autotuning (fp32)
-    # if args.model == "mobilenetv3-ssdlite":
-    #     executor.import_mobilenetv3_ssdlite_pytorch_onnx(target="opencl --device=mali", dtype="float32")
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'mobilenetv3-ssdlite.fp32.autotvm.log'
-    #     #executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-    #     # mobilenetv3-ssdlite autotuning (fp16)
-    #     executor.import_mobilenetv3_ssdlite_pytorch_onnx(target="opencl --device=mali", dtype="float16")
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'mobilenetv3-ssdlite.fp16.autotvm.log'
-    #     #executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-    # # deeplabv3 autotuning (fp32)
-    # if args.model == "deeplabv3":
-    #     executor.import_deeplabv3_onnx(target="opencl --device=mali", dtype="float32")
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
-    #     #executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
-
-    #     # deeplabv3 autotuning (fp16)
-    #     executor.import_deeplabv3_onnx(target="opencl --device=mali", dtype="float16")
-    #     opt = tuning_options
-    #     opt['log_filename'] = 'deeplabv3.fp32.autotvm.log'
-    #     #executor.tune_pending_benchmarks(opt=opt)
-    #     executor.tune_pending_benchmarks(apply_previous_tune=True, opt=opt)
-    #     executor.run_pending_benchmarks()
+    main()
