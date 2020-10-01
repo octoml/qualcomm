@@ -351,7 +351,7 @@ class ModelImporter(object):
 
     def import_mobilenetv3_ssdlite(self, target="llvm", dtype='float32'):
         import onnx
-        graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/ssd-mobilenetV3-pytorch/mb3-ssd.onnx")
+        graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/../models/ssd-mobilenetV3-pytorch/mb3-ssd.onnx")
         model = onnx.load_model(graph_file)
         input_shape = (1, 3, 300, 300)
         input_names, input_shape = get_input_data_shape_dict(model, input_shape)
@@ -362,7 +362,7 @@ class ModelImporter(object):
 
     def import_deeplabv3(self, target="llvm", dtype='float32'):
         import onnx
-        graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
+        graph_file = os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/../models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx")
         model = onnx.load_model(graph_file)
         input_shape = {"ImageTensor:0": (1,224,224,3)}
         input_names, shape_dict = get_input_data_shape_dict(model, input_shape["ImageTensor:0"])
@@ -373,7 +373,7 @@ class ModelImporter(object):
 
     def import_inceptionv3(self, target="llvm", dtype='float32'):
         import tvm.relay.testing.tf as tf_importer
-        graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/models/inception_v3_2016_08_28_frozen_opt.pb"))
+        graph_def = tf_importer.get_workload(os.path.abspath(os.path.dirname(os.path.realpath(__file__))+"/../models/inception_v3_2016_08_28_frozen_opt.pb"))
         graph_def = tf_importer.ProcessGraphDefParam(graph_def)
         input_shape = {"input": (1,299,299,3)}
         mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape, layout='NCHW')
