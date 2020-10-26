@@ -481,14 +481,17 @@ class ModelImporter(object):
 
         graph_file = os.path.abspath(
             os.path.dirname(os.path.realpath(__file__))
-            + "/../models/ssd-mobilenetV3-pytorch/mb3-ssd.onnx"
+            #+ "/../models/ssd-mobilenetV3-pytorch/mb3-ssd.onnx"
+            + "/../models/mobilenetv3_ssdlite_tf1.15export/mobilenetv3_ssdlite.v11.onnx"
         )
         model = onnx.load_model(graph_file)
         input_shape = (1, 3, 300, 300)
         input_names, input_shape = get_input_data_shape_dict(model, input_shape)
-        mod, params = relay.frontend.from_onnx(model, input_shape, opset=9)
+        mod, params = relay.frontend.from_onnx(model, input_shape, opset=10, freeze_params=True)
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
+        from tvm.relay import transform
+        mod = transform.DynamicToStatic()(mod)
         return (mod, params, input_shape, dtype, target)
 
     def import_deeplabv3(self, target="llvm", dtype="float32"):
@@ -503,9 +506,11 @@ class ModelImporter(object):
         input_names, shape_dict = get_input_data_shape_dict(
             model, input_shape["ImageTensor:0"]
         )
-        mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11)
+        mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11, freeze_params=True)
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
+        from tvm.relay import transform
+        mod = transform.DynamicToStatic()(mod)
         return (mod, params, input_shape, dtype, target)
 
     def import_inceptionv3(self, target="llvm", dtype="float32"):
