@@ -21,20 +21,108 @@ from tvm import autotvm
 from tvm.contrib import util, ndk
 
 
+class ModelImporter(object):
+    def available_models(self):
+        import inspect
+        models = []
+        for method in inspect.getmembers(type(self)):
+            if "import_" in method[0]:
+                models.append(method[0].split("import_")[1])
+        return models
+
+    def __call__(self, model, *args, **kwargs):
+        import inspect
+
+        for method in inspect.getmembers(type(self)):
+            if "import_" + model == method[0]:
+                return method[1](self, *args, **kwargs)
+        raise ValueError("import_" + model + " not found.")
+
+    def import_resnet50(self, target="llvm", dtype="float32"):
+        model, input_shape = gluon_model("resnet50_v1", batch_size=1)
+        mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        return (mod, params, input_shape, dtype, target)
+
+    def import_mobilenetv1(self, target="llvm", dtype="float32"):
+        model, input_shape = gluon_model("mobilenet1.0", batch_size=1)
+        mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        return (mod, params, input_shape, dtype, target)
+
+    def import_vgg16(self, target="llvm", dtype="float32"):
+        model, input_shape = gluon_model("vgg16", batch_size=1)
+        mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        return (mod, params, input_shape, dtype, target)
+
+    def import_mobilenetv3_ssdlite(self, target="llvm", dtype="float32"):
+        import onnx
+
+        graph_file = os.path.abspath(
+            os.path.dirname(os.path.realpath(__file__))
+            #+ "/../models/ssd-mobilenetV3-pytorch/mb3-ssd.onnx"
+            + "/../models/mobilenetv3_ssdlite_tf1.15export/mobilenetv3_ssdlite.v11.onnx"
+        )
+        model = onnx.load_model(graph_file)
+        input_shape = (1, 3, 300, 300)
+        input_names, input_shape = get_input_data_shape_dict(model, input_shape)
+        mod, params = relay.frontend.from_onnx(model, input_shape, opset=10, freeze_params=True)
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        from tvm.relay import transform
+        mod = transform.DynamicToStatic()(mod)
+        return (mod, params, input_shape, dtype, target)
+
+    def import_deeplabv3(self, target="llvm", dtype="float32"):
+        import onnx
+
+        graph_file = os.path.abspath(
+            os.path.dirname(os.path.realpath(__file__))
+            + "/../models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx"
+        )
+        model = onnx.load_model(graph_file)
+        input_shape = {"ImageTensor:0": (1, 224, 224, 3)}
+        input_names, shape_dict = get_input_data_shape_dict(
+            model, input_shape["ImageTensor:0"]
+        )
+        mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11, freeze_params=True)
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        from tvm.relay import transform
+        mod = transform.DynamicToStatic()(mod)
+        return (mod, params, input_shape, dtype, target)
+
+    def import_inceptionv3(self, target="llvm", dtype="float32"):
+        import tvm.relay.testing.tf as tf_importer
+
+        graph_def = tf_importer.get_workload(
+            os.path.abspath(
+                os.path.dirname(os.path.realpath(__file__))
+                + "/../models/inception_v3_2016_08_28_frozen_opt.pb"
+            )
+        )
+        graph_def = tf_importer.ProcessGraphDefParam(graph_def)
+        input_shape = {"input": (1, 299, 299, 3)}
+        mod, params = relay.frontend.from_tensorflow(
+            graph_def, shape=input_shape, layout="NCHW"
+        )
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        return (mod, params, input_shape, dtype, target)
+
+
 def get_args():
     import argparse
 
     parser = argparse.ArgumentParser(
         description="Tune and/or evaluate a curated set of models"
     )
-    models = [
-        "resnet50",
-        "mobilenetv1",
-        "inceptionv3",
-        "vgg16",
-        "mobilenetv3_ssdlite",
-        "deeplabv3",
-    ]
+    models = ModelImporter().available_models()
+
     parser.add_argument(
         "-m",
         "--model",
@@ -444,88 +532,6 @@ class Executor(object):
 
         autotvm.record.pick_best(tmp_log_file, log_filename)
         os.remove(tmp_log_file)
-
-
-class ModelImporter(object):
-    def __call__(self, model, *args, **kwargs):
-        import inspect
-
-        for method in inspect.getmembers(type(self)):
-            if "import_" + model == method[0]:
-                return method[1](self, *args, **kwargs)
-        raise ValueError("import_" + model + " not found.")
-
-    def import_resnet50(self, target="llvm", dtype="float32"):
-        model, input_shape = gluon_model("resnet50_v1", batch_size=1)
-        mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
-        if dtype == "float16":
-            mod = downcast_fp16(mod["main"], mod)
-        return (mod, params, input_shape, dtype, target)
-
-    def import_mobilenetv1(self, target="llvm", dtype="float32"):
-        model, input_shape = gluon_model("mobilenet1.0", batch_size=1)
-        mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
-        if dtype == "float16":
-            mod = downcast_fp16(mod["main"], mod)
-        return (mod, params, input_shape, dtype, target)
-
-    def import_vgg16(self, target="llvm", dtype="float32"):
-        model, input_shape = gluon_model("vgg16", batch_size=1)
-        mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
-        if dtype == "float16":
-            mod = downcast_fp16(mod["main"], mod)
-        return (mod, params, input_shape, dtype, target)
-
-    def import_mobilenetv3_ssdlite(self, target="llvm", dtype="float32"):
-        import onnx
-
-        graph_file = os.path.abspath(
-            os.path.dirname(os.path.realpath(__file__))
-            + "/../models/ssd-mobilenetV3-pytorch/mb3-ssd.onnx"
-        )
-        model = onnx.load_model(graph_file)
-        input_shape = (1, 3, 300, 300)
-        input_names, input_shape = get_input_data_shape_dict(model, input_shape)
-        mod, params = relay.frontend.from_onnx(model, input_shape, opset=9)
-        if dtype == "float16":
-            mod = downcast_fp16(mod["main"], mod)
-        return (mod, params, input_shape, dtype, target)
-
-    def import_deeplabv3(self, target="llvm", dtype="float32"):
-        import onnx
-
-        graph_file = os.path.abspath(
-            os.path.dirname(os.path.realpath(__file__))
-            + "/../models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx"
-        )
-        model = onnx.load_model(graph_file)
-        input_shape = {"ImageTensor:0": (1, 224, 224, 3)}
-        input_names, shape_dict = get_input_data_shape_dict(
-            model, input_shape["ImageTensor:0"]
-        )
-        mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11)
-        if dtype == "float16":
-            mod = downcast_fp16(mod["main"], mod)
-        return (mod, params, input_shape, dtype, target)
-
-    def import_inceptionv3(self, target="llvm", dtype="float32"):
-        import tvm.relay.testing.tf as tf_importer
-
-        graph_def = tf_importer.get_workload(
-            os.path.abspath(
-                os.path.dirname(os.path.realpath(__file__))
-                + "/../models/inception_v3_2016_08_28_frozen_opt.pb"
-            )
-        )
-        graph_def = tf_importer.ProcessGraphDefParam(graph_def)
-        input_shape = {"input": (1, 299, 299, 3)}
-        mod, params = relay.frontend.from_tensorflow(
-            graph_def, shape=input_shape, layout="NCHW"
-        )
-        if dtype == "float16":
-            mod = downcast_fp16(mod["main"], mod)
-        return (mod, params, input_shape, dtype, target)
-
 
 if __name__ == "__main__":
     main()
