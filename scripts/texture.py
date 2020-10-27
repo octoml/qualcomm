@@ -74,16 +74,21 @@ def get_remote():
     print("Tracker connected to remote RPC server")
     return tracker, remote
 
+def compute(shape):
+    X = te.placeholder(shape, name="X", dtype="float32")
+    Y = te.compute(shape, lambda i, j, k: X[i, j, k] + 1, name="Compute_Y")
+    return X, Y
+
 def schedule(X, Y):
     s = te.create_schedule(Y.op)
-    #Xc = s.cache_read(X, "global:texture", [Y])
-    Xc = s.cache_read(X, "global", [Y])
+    # Xt = s.cache_read(X, "global:texture", [Y])
+    Xt = s.cache_read(X, "global", [Y])
     bx = te.thread_axis("blockIdx.x")
     tx = te.thread_axis("threadIdx.x")
 
     # copy to texture stage
-    s[Xc].bind(s[Xc].op.axis[0], bx)
-    s[Xc].bind(s[Xc].op.axis[1], tx)
+    s[Xt].bind(s[Xt].op.axis[0], bx)
+    s[Xt].bind(s[Xt].op.axis[1], tx)
 
     # the compute stage
     bx1 = te.thread_axis("blockIdx.x")
@@ -97,9 +102,7 @@ def schedule(X, Y):
 
 def test_texture(target="opencl --device=mali", target_host="llvm -mtriple=arm64-linux-android"):
     shape =(32, 32, 4)
-    X = te.placeholder(shape, name="X", dtype="float32")
-    Y = te.compute(shape, lambda i, j, k: X[i, j, k] + 1, name="Compute_Y")
-
+    X, Y = compute(shape)
     s = schedule(X, Y)
 
     result = tvm.driver.lower(s, [X, Y])
