@@ -26,11 +26,11 @@ from tvm.contrib import util, ndk
 def get_args():
     import argparse
     parser = argparse.ArgumentParser(description='Set test arguments')
-    # parser.add_argument('-b', '--build', action="store_true", help='Whether to try to compile the test case; default is to lower only without compilation.')
+    #parser.add_argument('-b', '--build', action="store_true", help='Whether to try to compile the test case; default is to lower only without compilation.')
     # parser.add_argument('-e', '--evaluate', action="store_true", help='Whether to evaluate the kernel and schedule.')
     # parser.add_argument('-v', '--verify', action="store_false", help='Whether to verify numerical results of evaluation.')
     # parser.add_argument('-B', '--batch_size', type=int, help='Batch size to use in batched gemm computation')
-    # parser.add_argument('-M', type=int, help='Size of M for matrix A (MxK)')
+    parser.add_argument('-m', '--memory', type=str, default="texture", help='Use global or texture')
     # parser.add_argument('-N', type=int, help='Size of N for matrix B (KxN)')
     # parser.add_argument('-K', type=int, help='Size of reduction axis K')
     # parser.add_argument('-r', '--relay', action="store_true", help='Use relay for testing')
@@ -38,14 +38,14 @@ def get_args():
         "-r",
         "--rpc_tracker_host",
         type=str,
-        default=os.environ["TVM_TRACKER_HOST"],
+        default=None,
         help="RPC tracker host IP address",
     )
     parser.add_argument(
         "-p",
         "--rpc_tracker_port",
         type=str,
-        default=os.environ["TVM_TRACKER_PORT"],
+        default=None,
         help="RPC tracker host port",
     )
     parser.add_argument(
@@ -81,26 +81,25 @@ def compute(shape):
 
 def schedule(X, Y):
     s = te.create_schedule(Y.op)
-    # Xt = s.cache_read(X, "global:texture", [Y])
-    Xt = s.cache_read(X, "global", [Y])
-    bx = te.thread_axis("blockIdx.x")
-    tx = te.thread_axis("threadIdx.x")
+    #Xt = s.cache_read(X, "texture", [Y])
+    #Xt = s.cache_read(X, "global", [Y])
+    Xt = s.cache_read(X, args.memory, [Y])
 
     # copy to texture stage
-    s[Xt].bind(s[Xt].op.axis[0], bx)
-    s[Xt].bind(s[Xt].op.axis[1], tx)
+    x, y, c = s[Xt].op.axis
+    s[Xt].bind(x, te.thread_axis("blockIdx.x"))
+    s[Xt].bind(y, te.thread_axis("threadIdx.x"))
+    #s[Xt].vectorize(c)
 
     # the compute stage
-    bx1 = te.thread_axis("blockIdx.x")
-    tx1 = te.thread_axis("threadIdx.x")
     x, y, c = s[Y].op.axis
     xo, yo, xi, yi = s[Y].tile(x, y, 4, 4)
-    s[Y].bind(xo, bx1)
-    s[Y].bind(yo, tx1)
+    s[Y].bind(xo, te.thread_axis("blockIdx.x"))
+    s[Y].bind(yo, te.thread_axis("threadIdx.x"))
     s[Y].vectorize(yi)
     return s
 
-def test_texture(target="opencl --device=mali", target_host="llvm -mtriple=arm64-linux-android"):
+def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
     shape =(32, 32, 4)
     X, Y = compute(shape)
     s = schedule(X, Y)
@@ -109,7 +108,7 @@ def test_texture(target="opencl --device=mali", target_host="llvm -mtriple=arm64
     print("tvm.lower:\n", result)
 
     tracker, remote = get_remote()
-    func = tvm.driver.build(s, [X, Y], target=target, target_host=target_host, name="texture_function")
+    func = tvm.driver.build(s, [X, Y], target=target, target_host=target_host, name="TestFunction")
 
     temp = util.tempdir()
     dso_binary = "dev_lib_cl.so"
