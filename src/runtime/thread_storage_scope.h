@@ -38,6 +38,8 @@ namespace runtime {
  *       correspondence to the thread rank.
  */
 enum class StorageRank {
+  /*! \brief global texture memory */
+  kTexture = -1,
   /*! \brief global memory */
   kGlobal = 0,
   /*! \brief shared memory among thread group */
@@ -57,8 +59,6 @@ enum class StorageRank {
   kWMMAMatrixB = 5,
   /*! \brief wmma scope memory of accumulator */
   kWMMAAccumulator = 6,
-  /*! \brief global texture memory */
-  kTexture = 7,
 };
 
 /*!
