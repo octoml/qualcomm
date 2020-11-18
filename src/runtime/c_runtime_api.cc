@@ -160,6 +160,15 @@ void DeviceAPI::SyncStreamFromTo(TVMContext ctx, TVMStreamHandle event_src,
   LOG(FATAL) << "Device does not support stream api.";
 }
 
+void* DeviceAPI::AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) {
+  LOG(FATAL) << "Device does not support texture memory.";
+  return nullptr;
+}
+
+void DeviceAPI::FreeTexture(TVMContext ctx, void* ptr) {
+  LOG(FATAL) << "Device does not support texture memory.";
+}
+
 //--------------------------------------------------------
 // Error handling mechanism
 // -------------------------------------------------------
@@ -403,6 +412,31 @@ int TVMBackendFreeWorkspace(int device_type, int device_id, void* ptr) {
   ctx.device_type = static_cast<DLDeviceType>(device_type);
   ctx.device_id = device_id;
   DeviceAPIManager::Get(ctx)->FreeWorkspace(ctx, ptr);
+  return 0;
+}
+
+void* TVMBackendAllocTexture(int device_type, int device_id, uint64_t width, uint64_t height,
+                             int dtype_code_hint, int dtype_bits_hint) {
+  TVMContext ctx;
+  ctx.device_type = static_cast<DLDeviceType>(device_type);
+  ctx.device_id = device_id;
+
+  DLDataType type_hint;
+  type_hint.code = static_cast<decltype(type_hint.code)>(dtype_code_hint);
+  type_hint.bits = static_cast<decltype(type_hint.bits)>(dtype_bits_hint);
+  type_hint.lanes = 1;
+
+  return DeviceAPIManager::Get(ctx)->AllocTexture(ctx,
+                                                  static_cast<size_t>(width),
+                                                  static_cast<size_t>(height),
+                                                  type_hint);
+}
+
+int TVMBackendFreeTexture(int device_type, int device_id, void* ptr) {
+  TVMContext ctx;
+  ctx.device_type = static_cast<DLDeviceType>(device_type);
+  ctx.device_id = device_id;
+  DeviceAPIManager::Get(ctx)->FreeTexture(ctx, ptr);
   return 0;
 }
 

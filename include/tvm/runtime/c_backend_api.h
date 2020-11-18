@@ -100,6 +100,25 @@ TVM_DLL void* TVMBackendAllocWorkspace(int device_type, int device_id, uint64_t 
 TVM_DLL int TVMBackendFreeWorkspace(int device_type, int device_id, void* ptr);
 
 /*!
+ * \brief Backend function to allocate texture memory
+ *
+ * \param
+ * \return nullptr when error is thrown, a valid ptr if success
+ */
+TVM_DLL void* TVMBackendAllocTexture(int device_type, int device_id, uint64_t width,
+                                     uint64_t height, int dtype_code_hint, int dtype_bits_hint);
+
+/*!
+ * \brief Backend function to free texture memory
+ *
+ * \param
+ * \return 0 when no error is thrown, -1 when failure happens
+ *
+ * \sa TVMBackendAllocTexture
+ */
+TVM_DLL int TVMBackendFreeTexture(int device_type, int device_id, void* ptr);
+
+/*!
  * \brief Environment for TVM parallel task.
  */
 typedef struct {
