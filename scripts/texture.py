@@ -171,6 +171,9 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
     func(x_tvm, y_tvm)
     evaluator = func.time_evaluator(func.entry_name, ctx, number=3)
     print("time:", "%f ms" % (evaluator(x_tvm, y_tvm).mean * 1e3))
+    np_result = x_np + 1.0;
+    np.testing.assert_allclose(y_tvm.asnumpy(), np_result, rtol=1e-3, atol=1e-3)
+    print("validation done")
 
 if __name__ == "__main__":
     test_texture()
