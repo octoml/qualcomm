@@ -31,6 +31,7 @@ def get_args():
     # parser.add_argument('-v', '--verify', action="store_false", help='Whether to verify numerical results of evaluation.')
     # parser.add_argument('-B', '--batch_size', type=int, help='Batch size to use in batched gemm computation')
     parser.add_argument('-m', '--memory', type=str, default="texture", help='Use global or texture')
+    parser.add_argument('-t', '--tensor_rank', type=int, default=3, choices=[3, 5], help='Rank of the input tensor')
     # parser.add_argument('-N', type=int, help='Size of N for matrix B (KxN)')
     # parser.add_argument('-K', type=int, help='Size of reduction axis K')
     # parser.add_argument('-r', '--relay', action="store_true", help='Use relay for testing')
@@ -96,25 +97,69 @@ def schedule(X, Y):
     xo, yo, xi, yi = s[Y].tile(x, y, 4, 4)
     s[Y].bind(xo, te.thread_axis("blockIdx.x"))
     s[Y].bind(yo, te.thread_axis("threadIdx.x"))
-    s[Y].vectorize(yi)
+    #s[Y].vectorize(c)
+    return s
+
+def compute5d(shape):
+    X = te.placeholder(shape, name="X", dtype="float32")
+    Y = te.compute(shape, lambda i, j, k, l, m: X[i, j, k, l, m] + 1, name="Compute_Y")
+    return X, Y
+
+def schedule5d(X, Y):
+    s = te.create_schedule(Y.op)
+    #Xt = s.cache_read(X, "texture", [Y])
+    #Xt = s.cache_read(X, "global", [Y])
+    Xt = s.cache_read(X, args.memory, [Y])
+
+    # copy to texture stage
+    a, b, c, d, e = s[Xt].op.axis
+    #ab = s[Xt].fuse(a, b)
+    #cd = s[Xt].fuse(c, d)
+    bcd = s[Xt].fuse(b, c, d)
+    s[Xt].bind(a, te.thread_axis("blockIdx.x"))
+    s[Xt].bind(bcd, te.thread_axis("threadIdx.x"))
+    #s[Xt].vectorize(e)
+
+    # the compute stage
+    a, b, c, d, e = s[Y].op.axis
+    #ab = s[Y].fuse(a, b)
+    #cd = s[Y].fuse(c, d)
+    bcd = s[Y].fuse(b, c, d)
+    #xo, yo, xi, yi = s[Y].tile(ab, cd, 4, 4)
+    xo, yo, xi, yi = s[Y].tile(a, bcd, 4, 4)
+    s[Y].bind(xo, te.thread_axis("blockIdx.x"))
+    s[Y].bind(yo, te.thread_axis("threadIdx.x"))
+    #s[Y].vectorize(e)
     return s
 
 def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
-    shape =(32, 32, 4)
-    X, Y = compute(shape)
-    s = schedule(X, Y)
+    if args.tensor_rank == 3:
+        shape =(32, 32, 4)
+        X, Y = compute(shape)
+        s = schedule(X, Y)
+    elif args.tensor_rank == 5:
+        shape =(32, 2, 4, 4, 4)
+        X, Y = compute5d(shape)
+        s = schedule5d(X, Y)
 
     result = tvm.driver.lower(s, [X, Y])
     print("tvm.lower:\n", result)
 
-    tracker, remote = get_remote()
-    func = tvm.driver.build(s, [X, Y], target=target, target_host=target_host, name="TestFunction")
+    # script = tvm.script.asscript(result)
+    # print(script)
+    # if args.memory != "global":
+    #     return
+    # if args.tensor_rank != 3:
+    #     return
 
+    func = tvm.driver.build(s, [X, Y], target=target, target_host=target_host, name="TestFunction")
     temp = util.tempdir()
     dso_binary = "dev_lib_cl.so"
     dso_binary_path = temp.relpath(dso_binary)
     func.export_library(dso_binary_path, ndk.create_shared)
     print("OpenCL source:\n", func.imported_modules[0].get_source())
+    print("Binary file located in: ", dso_binary_path)
+    tracker, remote = get_remote()
     remote.upload(dso_binary_path)
     print("Uploading binary...")
     func = remote.load_module(dso_binary)
