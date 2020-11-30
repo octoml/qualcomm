@@ -31,7 +31,7 @@ def get_args():
     # parser.add_argument('-v', '--verify', action="store_false", help='Whether to verify numerical results of evaluation.')
     # parser.add_argument('-B', '--batch_size', type=int, help='Batch size to use in batched gemm computation')
     parser.add_argument('-m', '--memory', type=str, default="texture", help='Use global or texture')
-    parser.add_argument('-t', '--tensor_rank', type=int, default=3, choices=[3, 5], help='Rank of the input tensor')
+    parser.add_argument('-t', '--test', type=str, default="plus_one_rank3", choices=["plus_one_rank3", "plus_one_rank5", "matmul", "matmul_with_local"], help='Rank of the input tensor')
     # parser.add_argument('-N', type=int, help='Size of N for matrix B (KxN)')
     # parser.add_argument('-K', type=int, help='Size of reduction axis K')
     # parser.add_argument('-r', '--relay', action="store_true", help='Use relay for testing')
@@ -107,8 +107,6 @@ def compute5d(shape):
 
 def schedule5d(X, Y):
     s = te.create_schedule(Y.op)
-    #Xt = s.cache_read(X, "texture", [Y])
-    #Xt = s.cache_read(X, "global", [Y])
     Xt = s.cache_read(X, args.memory, [Y])
 
     # copy to texture stage
@@ -132,27 +130,81 @@ def schedule5d(X, Y):
     #s[Y].vectorize(e)
     return s
 
-def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
-    if args.tensor_rank == 3:
-        shape =(32, 32, 4)
-        X, Y = compute(shape)
-        s = schedule(X, Y)
-    elif args.tensor_rank == 5:
-        shape =(32, 2, 4, 4, 4)
-        X, Y = compute5d(shape)
-        s = schedule5d(X, Y)
+def compute_matmul(shape):
+    A = te.placeholder(shape, name="A", dtype="float32")
+    B = te.placeholder(shape, name="B", dtype="float32")
+    k = te.reduce_axis((0, shape[1]), name="k")
+    C = te.compute(
+        (shape[0]*shape[2], shape[0]*shape[2]),
+        lambda i, j: te.sum(
+            A[i//shape[2], k, i%shape[2]].astype("float") * B[j//shape[2], k, j%shape[2]].astype("float"), axis=[k]
+        ),
+        name="Compute_MatMul",
+    )
+    return A, B, C
 
-    result = tvm.driver.lower(s, [X, Y])
+def schedule_matmul(A, B, C, local=False):
+    s = te.create_schedule(C.op)
+    At = s.cache_read(A, args.memory, [C])
+    Bt = s.cache_read(B, args.memory, [C])
+    if local:
+        Al = s.cache_read(At, "local", [C])
+        Bl = s.cache_read(Bt, "local", [C])
+
+
+    bx = te.thread_axis("blockIdx.x")
+    tx = te.thread_axis("threadIdx.x")
+    def copy_to_texture(stage):
+        _io, _k, _ii = s[stage].op.axis
+        s[stage].bind(_io, bx)
+        s[stage].bind(_k, tx)
+
+    copy_to_texture(At)
+    copy_to_texture(Bt)
+
+    # the compute stage
+    _i, _j = s[C].op.axis
+    (_k,) = C.op.reduce_axis
+    xo, yo, xi, yi = s[C].tile(_i, _j, 4, 4)
+    s[C].reorder(_k, xi, yi)
+    s[C].bind(xo, te.thread_axis("blockIdx.x"))
+    s[C].bind(yo, te.thread_axis("threadIdx.x"))
+    s[C].unroll(xi)
+    s[C].vectorize(yi)
+
+    if local:
+        s[Al].compute_at(s[C], _k)
+        #s[Al].vectorize(s[Al].op.axis[-1])
+        s[Bl].compute_at(s[C], _k)
+        #s[Bl].vectorize(s[Bl].op.axis[-1])
+
+    return s
+
+
+#HERE: need to fix autovectorize on multiple forloops?
+
+def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
+    if args.test == "plus_one_rank3":
+        shape =(32, 32, 4)
+        placeholders = compute(shape)
+        s = schedule(*placeholders)
+    elif args.test == "matmul":
+        shape = (32, 32, 4)
+        placeholders = compute_matmul(shape)
+        s = schedule_matmul(*placeholders)
+    elif args.test == "matmul_with_local":
+        shape = (32, 32, 4)
+        placeholders = compute_matmul(shape)
+        s = schedule_matmul(*placeholders, local=True)
+    elif args.test == "plus_one_rank5":
+        shape =(32, 2, 4, 4, 4)
+        placeholders = compute5d(shape)
+        s = schedule5d(*placeholders)
+
+    result = tvm.driver.lower(s, placeholders)
     print("tvm.lower:\n", result)
 
-    # script = tvm.script.asscript(result)
-    # print(script)
-    # if args.memory != "global":
-    #     return
-    # if args.tensor_rank != 3:
-    #     return
-
-    func = tvm.driver.build(s, [X, Y], target=target, target_host=target_host, name="TestFunction")
+    func = tvm.driver.build(s, [*placeholders], target=target, target_host=target_host, name="TestFunction")
     temp = util.tempdir()
     dso_binary = "dev_lib_cl.so"
     dso_binary_path = temp.relpath(dso_binary)
@@ -163,17 +215,25 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
     remote.upload(dso_binary_path)
     print("Uploading binary...")
     func = remote.load_module(dso_binary)
-
     ctx = remote.cl(0)
-    x_np = np.random.uniform(size=shape).astype(X.dtype)
-    x_tvm = tvm.nd.array(x_np, ctx)
-    y_tvm = tvm.nd.array(np.zeros(shape, dtype=Y.dtype), ctx)
-    func(x_tvm, y_tvm)
+
+    args_tvm = []
+    args_np = []
+    for var in placeholders[:-1]:
+        var_np = np.random.uniform(size=[i.value for i in var.shape]).astype(var.dtype)
+        args_np.append(var_np)
+        args_tvm.append(tvm.nd.array(var_np, ctx))
+    args_tvm.append(tvm.nd.array(np.zeros([i.value for i in placeholders[-1].shape], dtype=placeholders[-1].dtype), ctx))
+    func(*args_tvm)
     evaluator = func.time_evaluator(func.entry_name, ctx, number=3)
-    print("time:", "%f ms" % (evaluator(x_tvm, y_tvm).mean * 1e3))
-    np_result = x_np + 1.0;
-    np.testing.assert_allclose(y_tvm.asnumpy(), np_result, rtol=1e-3, atol=1e-3)
+    print("time:", "%f ms" % (evaluator(*args_tvm).mean * 1e3))
+    if "plus_one" in args.test:
+        np_result = args_np[0] + 1.0;
+    elif "matmul" in args.test:
+        np_result = np.matmul(args_np[0].transpose((0, 2, 1)).reshape(128, 32), args_np[1].transpose(1, 0, 2).reshape(32,128))
+    np.testing.assert_allclose(args_tvm[-1].asnumpy(), np_result, rtol=1e-3, atol=1e-3)
     print("validation done")
+
 
 if __name__ == "__main__":
     test_texture()
