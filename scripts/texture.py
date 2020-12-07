@@ -90,14 +90,14 @@ def schedule(X, Y):
     x, y, c = s[Xt].op.axis
     s[Xt].bind(x, te.thread_axis("blockIdx.x"))
     s[Xt].bind(y, te.thread_axis("threadIdx.x"))
-    #s[Xt].vectorize(c)
+    s[Xt].vectorize(c)
 
     # the compute stage
     x, y, c = s[Y].op.axis
     xo, yo, xi, yi = s[Y].tile(x, y, 4, 4)
     s[Y].bind(xo, te.thread_axis("blockIdx.x"))
     s[Y].bind(yo, te.thread_axis("threadIdx.x"))
-    #s[Y].vectorize(c)
+    s[Y].vectorize(c)
     return s
 
 def compute5d(shape):
@@ -116,7 +116,7 @@ def schedule5d(X, Y):
     bcd = s[Xt].fuse(b, c, d)
     s[Xt].bind(a, te.thread_axis("blockIdx.x"))
     s[Xt].bind(bcd, te.thread_axis("threadIdx.x"))
-    #s[Xt].vectorize(e)
+    s[Xt].vectorize(e)
 
     # the compute stage
     a, b, c, d, e = s[Y].op.axis
@@ -127,7 +127,7 @@ def schedule5d(X, Y):
     xo, yo, xi, yi = s[Y].tile(a, bcd, 4, 4)
     s[Y].bind(xo, te.thread_axis("blockIdx.x"))
     s[Y].bind(yo, te.thread_axis("threadIdx.x"))
-    #s[Y].vectorize(e)
+    s[Y].vectorize(e)
     return s
 
 def compute_matmul(shape):
@@ -150,38 +150,43 @@ def schedule_matmul(A, B, C, local=False):
     if local:
         Al = s.cache_read(At, "local", [C])
         Bl = s.cache_read(Bt, "local", [C])
-
+    Cl = s.cache_write(C, "local")
 
     bx = te.thread_axis("blockIdx.x")
     tx = te.thread_axis("threadIdx.x")
     def copy_to_texture(stage):
         _io, _k, _ii = s[stage].op.axis
+        s[stage].vectorize(_ii)
         s[stage].bind(_io, bx)
         s[stage].bind(_k, tx)
 
     copy_to_texture(At)
     copy_to_texture(Bt)
 
-    # the compute stage
+    # copy to global stage
     _i, _j = s[C].op.axis
-    (_k,) = C.op.reduce_axis
     xo, yo, xi, yi = s[C].tile(_i, _j, 4, 4)
-    s[C].reorder(_k, xi, yi)
-    s[C].bind(xo, te.thread_axis("blockIdx.x"))
-    s[C].bind(yo, te.thread_axis("threadIdx.x"))
     s[C].unroll(xi)
     s[C].vectorize(yi)
+    s[C].bind(xo, te.thread_axis("blockIdx.x"))
+    s[C].bind(yo, te.thread_axis("threadIdx.x"))
+
+    # the compute stage
+    s[Cl].compute_at(s[C], yo)
+    (_k,) = Cl.op.reduce_axis
+    _x, _y = s[Cl].op.axis
+    s[Cl].reorder(_k, _x, _y)
+    s[Cl].unroll(_x)
+    s[Cl].vectorize(_y)
 
     if local:
-        s[Al].compute_at(s[C], _k)
-        #s[Al].vectorize(s[Al].op.axis[-1])
-        s[Bl].compute_at(s[C], _k)
-        #s[Bl].vectorize(s[Bl].op.axis[-1])
+        s[Al].compute_at(s[Cl], _k)
+        s[Al].vectorize(s[Al].op.axis[-1])
+        s[Bl].compute_at(s[Cl], _k)
+        s[Bl].vectorize(s[Bl].op.axis[-1])
 
     return s
 
-
-#HERE: need to fix autovectorize on multiple forloops?
 
 def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
     if args.test == "plus_one_rank3":
@@ -189,11 +194,11 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         placeholders = compute(shape)
         s = schedule(*placeholders)
     elif args.test == "matmul":
-        shape = (32, 32, 4)
+        shape = (32, 64, 4)
         placeholders = compute_matmul(shape)
         s = schedule_matmul(*placeholders)
     elif args.test == "matmul_with_local":
-        shape = (32, 32, 4)
+        shape = (32, 64, 4)
         placeholders = compute_matmul(shape)
         s = schedule_matmul(*placeholders, local=True)
     elif args.test == "plus_one_rank5":
@@ -230,7 +235,7 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
     if "plus_one" in args.test:
         np_result = args_np[0] + 1.0;
     elif "matmul" in args.test:
-        np_result = np.matmul(args_np[0].transpose((0, 2, 1)).reshape(128, 32), args_np[1].transpose(1, 0, 2).reshape(32,128))
+        np_result = np.matmul(args_np[0].transpose((0, 2, 1)).reshape(128, 64), args_np[1].transpose(1, 0, 2).reshape(64,128))
     np.testing.assert_allclose(args_tvm[-1].asnumpy(), np_result, rtol=1e-3, atol=1e-3)
     print("validation done")
 
