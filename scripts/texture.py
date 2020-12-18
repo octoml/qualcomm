@@ -19,9 +19,11 @@ import numpy as np
 
 import tvm
 import tvm.script
+from tvm import autotvm
 from tvm import te
 from tvm import relay
 from tvm.contrib import util, ndk
+from tvm.topi import testing
 
 def get_args():
     import argparse
@@ -31,7 +33,7 @@ def get_args():
     # parser.add_argument('-v', '--verify', action="store_false", help='Whether to verify numerical results of evaluation.')
     # parser.add_argument('-B', '--batch_size', type=int, help='Batch size to use in batched gemm computation')
     parser.add_argument('-m', '--memory', type=str, default="texture", help='Use global or texture')
-    parser.add_argument('-t', '--test', type=str, default="plus_one_rank3", choices=["plus_one_rank3", "plus_one_rank5", "matmul", "matmul_with_local"], help='Rank of the input tensor')
+    parser.add_argument('-t', '--test', type=str, required=True, help='Selected test to run')
     # parser.add_argument('-N', type=int, help='Size of N for matrix B (KxN)')
     # parser.add_argument('-K', type=int, help='Size of reduction axis K')
     # parser.add_argument('-r', '--relay', action="store_true", help='Use relay for testing')
@@ -75,6 +77,57 @@ def get_remote():
     print("Tracker connected to remote RPC server")
     return tracker, remote
 
+# TODO(csullivan): Improve executor class to be able to consume input values
+# and return outputs, then refactor to use Executor in this test file
+def tune_tasks(
+        tasks,
+        measure_option,
+        tuner="xgb",
+        n_trial=1024,
+        early_stopping=None,
+        log_filename="tuning.log",
+        use_transfer_learning=True,
+    ):
+        from tvm.autotvm.tuner import XGBTuner
+        from tvm.autotvm.tuner import GATuner
+
+        tmp_log_file = log_filename + ".tmp"
+        if os.path.exists(tmp_log_file):
+            os.remove(tmp_log_file)
+
+        for i, tsk in enumerate(reversed(tasks)):
+            prefix = "[Task %2d/%2d] " % (i + 1, len(tasks))
+            if tuner == "xgb" or tuner == "xgb-rank":
+                tuner_obj = XGBTuner(tsk, loss_type="rank")
+            elif tuner == "xgb_knob":
+                tuner_obj = XGBTuner(tsk, loss_type="rank", feature_type="knob")
+            elif tuner == "ga":
+                tuner_obj = GATuner(tsk, pop_size=50)
+            elif tuner == "random":
+                tuner_obj = RandomTuner(tsk)
+            elif tuner == "gridsearch":
+                tuner_obj = GridSearchTuner(tsk)
+            else:
+                raise ValueError("Invalid tuner: " + tuner)
+
+            if use_transfer_learning:
+                if os.path.isfile(tmp_log_file):
+                    tuner_obj.load_history(autotvm.record.load_from_file(tmp_log_file))
+
+            tsk_trial = min(n_trial, len(tsk.config_space))
+            tuner_obj.tune(
+                n_trial=tsk_trial,
+                early_stopping=early_stopping,
+                measure_option=measure_option,
+                callbacks=[
+                    autotvm.callback.progress_bar(tsk_trial, prefix=prefix),
+                    autotvm.callback.log_to_file(tmp_log_file),
+                ],
+            )
+
+        autotvm.record.pick_best(tmp_log_file, log_filename)
+        os.remove(tmp_log_file)
+
 def compute(shape):
     X = te.placeholder(shape, name="X", dtype="float32")
     Y = te.compute(shape, lambda i, j, k: X[i, j, k] + 1, name="Compute_Y")
@@ -111,20 +164,15 @@ def schedule5d(X, Y):
 
     # copy to texture stage
     a, b, c, d, e = s[Xt].op.axis
-    #ab = s[Xt].fuse(a, b)
-    #cd = s[Xt].fuse(c, d)
-    bcd = s[Xt].fuse(b, c, d)
-    s[Xt].bind(a, te.thread_axis("blockIdx.x"))
-    s[Xt].bind(bcd, te.thread_axis("threadIdx.x"))
+    abc = s[Xt].fuse(a, b, c)
+    s[Xt].bind(abc, te.thread_axis("blockIdx.x"))
+    s[Xt].bind(d, te.thread_axis("threadIdx.x"))
     s[Xt].vectorize(e)
 
     # the compute stage
     a, b, c, d, e = s[Y].op.axis
-    #ab = s[Y].fuse(a, b)
-    #cd = s[Y].fuse(c, d)
-    bcd = s[Y].fuse(b, c, d)
-    #xo, yo, xi, yi = s[Y].tile(ab, cd, 4, 4)
-    xo, yo, xi, yi = s[Y].tile(a, bcd, 4, 4)
+    abc = s[Y].fuse(a, b, c)
+    xo, yo, xi, yi = s[Y].tile(abc, d, 4, 4)
     s[Y].bind(xo, te.thread_axis("blockIdx.x"))
     s[Y].bind(yo, te.thread_axis("threadIdx.x"))
     s[Y].vectorize(e)
@@ -188,6 +236,257 @@ def schedule_matmul(A, B, C, local=False):
     return s
 
 
+def compute_matmul_inner(shape):
+    A = te.placeholder(shape, name="A", dtype="float32")
+    B = te.placeholder(shape, name="B", dtype="float32")
+    k = te.reduce_axis((0, shape[1]*shape[2]), name="k")
+    # (M, K) x (N, K)
+    # (32, 256) x (32, 256)
+    # (32, 64, 4) x (32, 64, 4)
+    C = te.compute(
+        (shape[0], shape[0]),
+        lambda i, j: te.sum(
+            A[i, k//shape[2], k%shape[2]].astype("float") * B[j, k//shape[2], k%shape[2]].astype("float"), axis=[k]
+        ),
+        name="Compute_MatMul",
+    )
+    return A, B, C
+
+def schedule_matmul_inner(A, B, C, local=False):
+    s = te.create_schedule(C.op)
+    At = s.cache_read(A, args.memory, [C])
+    Bt = s.cache_read(B, args.memory, [C])
+    if local:
+        Al = s.cache_read(At, "local", [C])
+        Bl = s.cache_read(Bt, "local", [C])
+    Cl = s.cache_write(C, "local")
+
+    bx = te.thread_axis("blockIdx.x")
+    tx = te.thread_axis("threadIdx.x")
+    def copy_to_texture(stage):
+        _i, _ko, _ki = s[stage].op.axis
+        s[stage].vectorize(_ki)
+        s[stage].bind(_i, bx)
+        s[stage].bind(_ko, tx)
+
+    copy_to_texture(At)
+    copy_to_texture(Bt)
+
+    # copy to global stage
+    _i, _j = s[C].op.axis
+    xo, yo, xi, yi = s[C].tile(_i, _j, 4, 4)
+    s[C].unroll(xi)
+    s[C].vectorize(yi)
+    s[C].bind(xo, te.thread_axis("blockIdx.x"))
+    s[C].bind(yo, te.thread_axis("threadIdx.x"))
+
+    # the compute stage
+    s[Cl].compute_at(s[C], yo)
+    (_k,) = Cl.op.reduce_axis
+    _x, _y = s[Cl].op.axis
+    s[Cl].reorder(_x, _y, _k)
+    s[Cl].unroll(_x)
+    # TODO(csullivan): consider whether the below error is worth resolving
+    # s[Cl].vectorize(_y) # error
+
+    if local:
+        s[Al].compute_at(s[Cl], _x)
+        s[Al].vectorize(s[Al].op.axis[-1])
+        s[Bl].compute_at(s[Cl], _x)
+        s[Bl].vectorize(s[Bl].op.axis[-1])
+
+    return s
+
+def compute_matmul_vector_accumulator(shapeA, shapeB):
+    # A x B
+    # (K/4, M, K%4) x (K, N/4, N%4) = (M, N)
+    # (32, 64, 4) x (128, 16, 4) = (64, 64)
+    A = te.placeholder(shapeA, name="A", dtype="float32")
+    B = te.placeholder(shapeB, name="B", dtype="float32")
+    k = te.reduce_axis((0, shapeB[0]), name="k")
+    C = te.compute(
+        (shapeA[1], shapeB[1]*shapeB[2]),
+        lambda i, j: te.sum(
+            A[k//shapeA[-1], i, k%shapeA[-1]].astype("float") * B[k, j//shapeB[-1], j%shapeB[-1]].astype("float"), axis=[k]
+        ),
+        name="Compute_MatMul",
+    )
+    return A, B, C
+
+def schedule_matmul_vector_accumulator(A, B, C, local=False):
+    s = te.create_schedule(C.op)
+    At = s.cache_read(A, args.memory, [C])
+    Bt = s.cache_read(B, args.memory, [C])
+    if local:
+        Al = s.cache_read(At, "local", [C])
+        Bl = s.cache_read(Bt, "local", [C])
+    Cl = s.cache_write(C, "local")
+
+    def copy_to_texture(stage):
+        _y, _x, _v = s[stage].op.axis
+        # TODO(csullivan): removing this vectorize results in numerical errors, autovectorize
+        s[stage].vectorize(_v)
+        s[stage].bind(_y, te.thread_axis("blockIdx.x"))
+        s[stage].bind(_x, te.thread_axis("threadIdx.x"))
+
+    copy_to_texture(At)
+    copy_to_texture(Bt)
+
+    # copy to global stage
+    _i, _j = s[C].op.axis
+    xo, yo, xi, yi = s[C].tile(_i, _j, 4, 4)
+    s[C].unroll(xi)
+    s[C].vectorize(yi)
+    s[C].bind(xo, te.thread_axis("blockIdx.x"))
+    s[C].bind(yo, te.thread_axis("threadIdx.x"))
+
+    # the compute stage
+    s[Cl].compute_at(s[C], yo)
+    (_k,) = Cl.op.reduce_axis
+    _a, _b = s[Cl].op.axis
+    _ko, _ki = s[Cl].split(_k, factor=4)
+    s[Cl].reorder(_ko, _a, _ki, _b)
+    s[Cl].unroll(_ki)
+    s[Cl].unroll(_a)
+    s[Cl].vectorize(_b)
+
+    if local:
+        s[Al].compute_at(s[Cl], _a)
+        _aa, _ka, _ba = s[Al].op.axis
+        # TODO(csullivan)[BEFORE PR]: removing this vectorize command causes a crash. This needs to be autovectorized.
+        s[Al].vectorize(_ba)
+        s[Bl].compute_at(s[Cl], _ko)
+        _ab, _kb, _bb = s[Bl].op.axis
+        s[Bl].vectorize(_bb)
+        s[Bl].unroll(_ab)
+
+    return s
+
+def schedule_matmul_vector_accumulator_autotvm(A, B, C):
+    s = te.create_schedule(C.op)
+    cfg = autotvm.get_config()
+
+    At = s.cache_read(A, args.memory, [C])
+    Bt = s.cache_read(B, args.memory, [C])
+    Al = s.cache_read(At, "local", [C])
+    Bl = s.cache_read(Bt, "local", [C])
+    Cl = s.cache_write(C, "local")
+
+    def copy_to_texture(stage):
+        _y, _x, _v = s[stage].op.axis
+        s[stage].vectorize(_v)
+        s[stage].bind(_y, te.thread_axis("blockIdx.x"))
+        s[stage].bind(_x, te.thread_axis("threadIdx.x"))
+
+    copy_to_texture(At)
+    copy_to_texture(Bt)
+
+    # copy to global stage
+    _i, _j = s[C].op.axis
+    xo, yo, xi, yi = s[C].tile(_i, _j, 4, 4)
+    s[C].unroll(xi)
+    s[C].vectorize(yi)
+    s[C].bind(xo, te.thread_axis("blockIdx.x"))
+    s[C].bind(yo, te.thread_axis("threadIdx.x"))
+
+    # the compute stage
+    s[Cl].compute_at(s[C], yo)
+    (_k,) = Cl.op.reduce_axis
+    _a, _b = s[Cl].op.axis
+    _ko, _ki = s[Cl].split(_k, factor=4)
+
+    s[Cl].reorder(_ko, _a, _ki, _b)
+    cfg.define_knob("unroll", [0, 1])
+    if cfg["unroll"] == 1:
+        s[Cl].unroll(_ki)
+        s[Cl].unroll(_a)
+    s[Cl].vectorize(_b)
+
+    s[Al].compute_at(s[Cl], _a)
+    _aa, _ka, _ba = s[Al].op.axis
+    s[Al].vectorize(_ba)
+    s[Bl].compute_at(s[Cl], _ko)
+    _ab, _kb, _bb = s[Bl].op.axis
+    s[Bl].vectorize(_bb)
+    s[Bl].unroll(_ab)
+
+
+    return s
+
+def compute_conv2d_1x1_NCHWc_RSCKk(input_shape, filter_shape):
+    # conv2d( [N, C, H, W, c] , [1, 1, C, K, k]
+    data = te.placeholder(input_shape, name="data", dtype="float32")
+    filt = te.placeholder(filter_shape, name="filter", dtype="float32")
+    c = te.reduce_axis((0, filter_shape[-2]), name="C")
+    c4 = te.reduce_axis((0, filter_shape[-1]), name="c4")
+    kh = te.reduce_axis((0, filter_shape[0]), name="kh")
+    kw = te.reduce_axis((0, filter_shape[1]), name="kw")
+    conv = te.compute(
+        (input_shape[0], filter_shape[-2], input_shape[2], input_shape[3], filter_shape[-1]),
+        lambda n, ko, i, j, ki: te.sum(
+            data[n, c, i, j, c4].astype("float") * filt[kh, kw, c*input_shape[-1] + c4, ko, ki].astype("float"), axis=[kh, kw, c, c4]
+        ),
+        #name="Compute_conv2d_1x1_NCHWc_RSCKk",
+        name = "conv2d_1x1"
+    )
+    return data, filt, conv
+
+def schedule_conv2d_1x1_NCHWc_RSCKk(data, filt, conv):
+    # inputs: (1, 128//4, 56, 56, 4), (1, 1, 128, 128//4, 4)
+    # outputs:
+    s = te.create_schedule(conv.op)
+    A, B, C = data, filt, conv
+    At = s.cache_read(A, args.memory, [C])
+    Bt = s.cache_read(B, args.memory, [C])
+    Al = s.cache_read(At, "local", [C])
+    Bl = s.cache_read(Bt, "local", [C])
+    Cl = s.cache_write(C, "local")
+
+    def copy_to_texture(stage):
+        axes = s[stage].op.axis
+        fused = s[stage].fuse(*axes[:-1])
+        block, thread = s[stage].split(fused, factor=32)
+        s[stage].vectorize(axes[-1])
+        s[stage].bind(block, te.thread_axis("blockIdx.x"))
+        s[stage].bind(thread, te.thread_axis("threadIdx.x"))
+    copy_to_texture(At)
+    copy_to_texture(Bt)
+
+    _n, _ko, _h, _w, _ki = s[C].op.axis
+    s[C].vectorize(_ki)
+    s[C].bind(_n, te.thread_axis("blockIdx.x"))
+    s[C].bind(_ko, te.thread_axis("threadIdx.x"))
+
+    s[Cl].compute_at(s[C], _w)
+    _nl, _kol, _hl, _wl, _kil = s[Cl].op.axis
+    _khl, _kwl, _cl, _cl4 = s[Cl].op.reduce_axis
+    _clo, _cli = s[Cl].split(_cl, factor=4)
+    s[Cl].reorder(_clo, _cli, _cl4, _kil)
+    s[Cl].unroll(_cli)
+    s[Cl].unroll(_cl4)
+    s[Cl].vectorize(_kil)
+
+    s[Al].compute_at(s[Cl], _cli)
+    s[Al].vectorize(s[Al].op.axis[-1])
+    s[Bl].compute_at(s[Cl], _kwl)
+    s[Bl].vectorize(s[Bl].op.axis[-1])
+
+    return s
+
+
+
+@autotvm.template("matmul_vector_accumulator_tune")
+def matmul_vector_acc_template(shapeA, shapeB):
+    placeholders = compute_matmul_vector_accumulator(shapeA, shapeB)
+    s = schedule_matmul_vector_accumulator_autotvm(*placeholders)
+    return s, placeholders
+
+@autotvm.template("conv2d_1x1_NCHWc_RSCKk_tune")
+def conv2d_1x1_NCHWc_RSCKk_template(input_shape, filter_shape):
+    placeholders = compute_conv2d_1x1_NCHWc_RSCKk(input_shape, filter_shape)
+    s = schedule_conv2d_1x1_NCHWc_RSCKk(*placeholders)
+    return s, placeholders
+
 def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
     if args.test == "plus_one_rank3":
         shape =(32, 32, 4)
@@ -201,10 +500,55 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         shape = (32, 64, 4)
         placeholders = compute_matmul(shape)
         s = schedule_matmul(*placeholders, local=True)
+    elif args.test == "matmul_inner":
+        shape = (32, 64, 4)
+        placeholders = compute_matmul_inner(shape)
+        s = schedule_matmul_inner(*placeholders)
+    elif args.test == "matmul_vector_accumulator":
+        shapeA, shapeB = (32, 64, 4), (128, 16, 4)
+        placeholders = compute_matmul_vector_accumulator(shapeA, shapeB)
+        s = schedule_matmul_vector_accumulator(*placeholders)
+    elif args.test == "matmul_vector_accumulator_with_local":
+        shapeA, shapeB = (32, 64, 4), (128, 16, 4)
+        placeholders = compute_matmul_vector_accumulator(shapeA, shapeB)
+        s = schedule_matmul_vector_accumulator(*placeholders, local=True)
     elif args.test == "plus_one_rank5":
         shape =(32, 2, 4, 4, 4)
         placeholders = compute5d(shape)
         s = schedule5d(*placeholders)
+    elif "tune" in args.test:
+        options = {
+            "log_filename": "test_tune.log",
+            "early_stopping": None,
+            "measure_option": autotvm.measure_option(
+                builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=1000),
+                runner=autotvm.RPCRunner(
+                    args.rpc_key,
+                    host=args.rpc_tracker_host,
+                    port=args.rpc_tracker_port,
+                    number=5,
+                    timeout=1000,
+                ),
+            )
+        }
+        def tune_and_bench(func, template, *args, **kwargs):
+            task = autotvm.task.create(template, args=args, target=target, target_host=target_host)
+            print(task.config_space)
+            tune_tasks([task], **options)
+            with autotvm.apply_history_best(options["log_filename"]):
+                with tvm.target.Target(target):
+                    return func(*args)
+        if args.test == "matmul_vector_accumulator_tune":
+            shapeA, shapeB = (32, 64, 4), (128, 16, 4)
+            s, placeholders = tune_and_bench(matmul_vector_acc_template, args.test, shapeA, shapeB)
+        elif args.test == "conv2d_1x1_NCHWc_RSCKk_tune":
+            # mobilenetv1 1x1 conv2d
+            input_shape, filter_shape = (1, 128//4, 56, 56, 4), (1, 1, 128, 128//4, 4)
+            s, placeholders = tune_and_bench(conv2d_1x1_NCHWc_RSCKk_template, args.test, input_shape, filter_shape)
+        else:
+            raise RuntimeError("No test found with name: " + args.test)
+    else:
+        raise RuntimeError("No test found with name: " + args.test)
 
     result = tvm.driver.lower(s, placeholders)
     print("tvm.lower:\n", result)
@@ -235,7 +579,22 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
     if "plus_one" in args.test:
         np_result = args_np[0] + 1.0;
     elif "matmul" in args.test:
-        np_result = np.matmul(args_np[0].transpose((0, 2, 1)).reshape(128, 64), args_np[1].transpose(1, 0, 2).reshape(64,128))
+        if 'inner' in args.test:
+            np_result = np.matmul(args_np[0].reshape(32, 256), args_np[1].reshape(32, 256).transpose(1, 0))
+        elif 'accum' in args.test:
+            np_result = np.matmul(args_np[0].transpose((1, 0, 2)).reshape(64, 128), args_np[1].reshape(128, 64))
+        else:
+            np_result = np.matmul(args_np[0].transpose((0, 2, 1)).reshape(128, 64), args_np[1].transpose(1, 0, 2).reshape(64,128))
+    elif args.test == "conv2d_1x1_NCHWc_RSCKk_tune":
+        vec_length = args_np[1].shape[-1]
+        # nchwc -> nchw
+        args_np[0] = args_np[0].transpose((0, 1, 4, 2, 3)).reshape(args_np[0].shape[0], args_np[0].shape[1]*args_np[0].shape[-1], args_np[0].shape[2], args_np[0].shape[3])
+        # rsckk -> rsck -> kcrs
+        args_np[1] = args_np[1].reshape(args_np[1].shape[1], args_np[1].shape[1], args_np[1].shape[2], args_np[1].shape[3]*args_np[1].shape[4]).transpose((3, 2, 0, 1))
+        np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
+        # nkhw -> nkhwk
+        np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+
     np.testing.assert_allclose(args_tvm[-1].asnumpy(), np_result, rtol=1e-3, atol=1e-3)
     print("validation done")
 
