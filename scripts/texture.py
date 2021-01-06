@@ -417,8 +417,8 @@ def compute_conv2d_1x1_NCHWc_RSCKk(input_shape, filter_shape):
     # conv2d( [N, C, H, W, c] , [1, 1, C, K, k]
     data = te.placeholder(input_shape, name="data", dtype="float32")
     filt = te.placeholder(filter_shape, name="filter", dtype="float32")
-    c = te.reduce_axis((0, filter_shape[-2]), name="C")
-    c4 = te.reduce_axis((0, filter_shape[-1]), name="c4")
+    c = te.reduce_axis((0, input_shape[1]), name="C")
+    c4 = te.reduce_axis((0, input_shape[-1]), name="c4")
     kh = te.reduce_axis((0, filter_shape[0]), name="kh")
     kw = te.reduce_axis((0, filter_shape[1]), name="kw")
     conv = te.compute(
@@ -474,6 +474,117 @@ def schedule_conv2d_1x1_NCHWc_RSCKk(data, filt, conv):
     return s
 
 
+def compute_conv2d_1x1_WCHNc_CRSKk(input_shape, filter_shape):
+    # input_shape = [W, C, H, N, c] -> [W, C, H*N, c]
+    # filter_shape = [C, R, S, K, k] -> [C, R*S*K, k]
+    # output_shape: [WK, HN, k] -> [W, K, H, N, k]
+    data = te.placeholder(input_shape, name="data", dtype="float32")
+    filt = te.placeholder(filter_shape, name="filter", dtype="float32")
+
+    packed_data = te.compute(
+        (input_shape[0], input_shape[1], input_shape[2] * input_shape[3], input_shape[4]),
+        lambda i, j, k, l: data[i, j, k//input_shape[3], k%input_shape[3], l],
+        name = "packed_data"
+    )
+
+    packed_filter = te.compute(
+        (filter_shape[0], filter_shape[1] * filter_shape[2] * filter_shape[3], filter_shape[4]),
+        lambda i, j, k: filt[i, j//(filter_shape[3] * filter_shape[2]), (j//filter_shape[3])%filter_shape[2], j%filter_shape[3], k],
+        name = "packed_filter"
+    )
+
+    c = te.reduce_axis((0, input_shape[1]), name="C")
+    c4 = te.reduce_axis((0, input_shape[-1]), name="c4")
+    r = te.reduce_axis((0, filter_shape[1]), name="r")
+    s = te.reduce_axis((0, filter_shape[2]), name="s")
+
+    conv = te.compute(
+        (input_shape[0], filter_shape[3], input_shape[2], input_shape[3], filter_shape[4]),
+        lambda w, ko, h, n, ki: te.sum(
+            packed_data[w, c, h * input_shape[3] + n, c4].astype("float")
+            *
+            packed_filter[c*input_shape[-1] + c4, ((r * filter_shape[2]) + s) * filter_shape[3] + ko, ki].astype("float"), axis=[r, s, c, c4]
+        ),
+        name = "conv2d_1x1"
+    )
+    return data, filt, packed_data, packed_filter, conv
+
+def schedule_conv2d_1x1_WCHNc_CRSKk(data, filt, packed_data, packed_filter, conv):
+    # data: [W, C, H*N, c]
+    # filter: [C, R*S*K, k]
+    # output: [W, K, H, N, k]
+
+    # conv2d( [N, C, H, W, c] , [1, 1, C, K, k]
+    # inputs: (1, 128//4, 56, 56, 4), (1, 1, 128, 128//4, 4)
+
+    # data: (56, 128//4, 56*1, 4) = (56, 32, 56, 4)
+    # filt: (128, 1*1*128//4, 4) = (128, 32, 4)
+    # conv: (56, 32, 56, 1, 4)
+    s = te.create_schedule(conv.op)
+    s[packed_data].compute_inline()
+    s[packed_filter].compute_inline()
+    A, B, C = packed_data, packed_filter, conv
+    At = s.cache_read(A, args.memory, [C])
+    Bt = s.cache_read(B, args.memory, [C])
+    Al = s.cache_read(At, "local", [C])
+    Bl = s.cache_read(Bt, "local", [C])
+    Cl = s.cache_write(C, "local")
+
+    def copy_to_texture(stage):
+        axes = s[stage].op.axis
+        fused = s[stage].fuse(*axes[:-1])
+        block, thread = s[stage].split(fused, factor=32)
+        s[stage].vectorize(axes[-1])
+        s[stage].bind(block, te.thread_axis("blockIdx.x"))
+        s[stage].bind(thread, te.thread_axis("threadIdx.x"))
+    copy_to_texture(At)
+    copy_to_texture(Bt)
+
+
+    _w, _ko, _h, _n, _ki = s[C].op.axis
+    s[C].vectorize(_ki)
+    # TODO(csullivan): Try uneven workgroup split
+    _wo, _wi = s[C].split(_w, factor=4)
+    _hn = s[C].fuse(_h, _n)
+    #_hno, _hni = s[C].split(_hn, factor=8)
+    #s[C].reorder(_wo, _wi, _ko, _hno, _hni, _ki)
+    s[C].reorder(_wo, _ko, _hn, _ki, _wi)
+    s[C].unroll(_wi)
+
+    # mace:
+    # const int out_ch_blk = get_global_id(0);
+    # const int out_w_blk = get_global_id(1);
+    # const int out_hb = get_global_id(2);
+
+    bx = te.thread_axis("blockIdx.x")
+    by = te.thread_axis("blockIdx.y")
+    bz = te.thread_axis("blockIdx.z")
+    s[C].bind(_ko, bx)
+    s[C].bind(_wo, by)
+    s[C].bind(_hn, bz)
+
+    s[Cl].compute_at(s[C], _hn)
+    _wl, _kol, _hl, _nl, _kil = s[Cl].op.axis
+    _khl, _kwl, _cl, _cl4 = s[Cl].op.reduce_axis
+    s[Cl].reorder(_cl, _cl4, _kil, _wl)
+    s[Cl].unroll(_cl4)
+    s[Cl].unroll(_wl)
+    s[Cl].vectorize(_kil)
+
+
+    _wla, _cla, _hnla, _cl4a = s[Al].op.axis
+    s[Al].compute_at(s[Cl], _cl)
+    s[Al].vectorize(_cl4a)
+    s[Al].unroll(_wla)
+
+    _clb, _rskolb, _kilb = s[Bl].op.axis
+    s[Bl].compute_at(s[Cl], _cl)
+    s[Bl].vectorize(_kilb)
+    s[Bl].unroll(_clb)
+
+
+    return s
+
 
 @autotvm.template("matmul_vector_accumulator_tune")
 def matmul_vector_acc_template(shapeA, shapeB):
@@ -486,6 +597,12 @@ def conv2d_1x1_NCHWc_RSCKk_template(input_shape, filter_shape):
     placeholders = compute_conv2d_1x1_NCHWc_RSCKk(input_shape, filter_shape)
     s = schedule_conv2d_1x1_NCHWc_RSCKk(*placeholders)
     return s, placeholders
+
+@autotvm.template("conv2d_1x1_WCHNc_CRSKk_tune")
+def conv2d_1x1_WCHNc_CRSKk_template(input_shape, filter_shape):
+    placeholders = compute_conv2d_1x1_WCHNc_CRSKk(input_shape, filter_shape)
+    s = schedule_conv2d_1x1_WCHNc_CRSKk(*placeholders)
+    return s, (placeholders[0], placeholders[1], placeholders[-1])
 
 def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
     if args.test == "plus_one_rank3":
@@ -534,7 +651,7 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         def tune_and_bench(func, template, *args, **kwargs):
             task = autotvm.task.create(template, args=args, target=target, target_host=target_host)
             print(task.config_space)
-            tune_tasks([task], **options)
+            #tune_tasks([task], **options)
             with autotvm.apply_history_best(options["log_filename"]):
                 with tvm.target.Target(target):
                     return func(*args)
@@ -545,6 +662,9 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
             # mobilenetv1 1x1 conv2d
             input_shape, filter_shape = (1, 128//4, 56, 56, 4), (1, 1, 128, 128//4, 4)
             s, placeholders = tune_and_bench(conv2d_1x1_NCHWc_RSCKk_template, args.test, input_shape, filter_shape)
+        elif args.test == "conv2d_1x1_WCHNc_CRSKk_tune":
+            input_shape, filter_shape = (56, 128//4, 56, 1, 4), (128, 1, 1, 128//4, 4)
+            s, placeholders = tune_and_bench(conv2d_1x1_WCHNc_CRSKk_template, args.test, input_shape, filter_shape)
         else:
             raise RuntimeError("No test found with name: " + args.test)
     else:
@@ -590,10 +710,19 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         # nchwc -> nchw
         args_np[0] = args_np[0].transpose((0, 1, 4, 2, 3)).reshape(args_np[0].shape[0], args_np[0].shape[1]*args_np[0].shape[-1], args_np[0].shape[2], args_np[0].shape[3])
         # rsckk -> rsck -> kcrs
-        args_np[1] = args_np[1].reshape(args_np[1].shape[1], args_np[1].shape[1], args_np[1].shape[2], args_np[1].shape[3]*args_np[1].shape[4]).transpose((3, 2, 0, 1))
+        args_np[1] = args_np[1].reshape(args_np[1].shape[0], args_np[1].shape[1], args_np[1].shape[2], args_np[1].shape[3]*args_np[1].shape[4]).transpose((3, 2, 0, 1))
         np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
         # nkhw -> nkhwk
         np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+    elif args.test == "conv2d_1x1_WCHNc_CRSKk_tune":
+        vec_length = args_np[1].shape[-1]
+        # wchnc -> nchw
+        args_np[0] = args_np[0].transpose((3, 1, 4, 2, 0)).reshape(args_np[0].shape[3], args_np[0].shape[1]*args_np[0].shape[-1], args_np[0].shape[2], args_np[0].shape[0])
+        # crskk -> crsk -> kcrs
+        args_np[1] = args_np[1].reshape(args_np[1].shape[0], args_np[1].shape[1], args_np[1].shape[2], args_np[1].shape[3]*args_np[1].shape[4]).transpose((3, 0, 1, 2))
+        np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
+        # nkhw -> nkkhw -> wkhnk
+        np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(4, 1, 3, 0, 2)
 
     np.testing.assert_allclose(args_tvm[-1].asnumpy(), np_result, rtol=1e-3, atol=1e-3)
     print("validation done")
