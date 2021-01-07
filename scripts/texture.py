@@ -24,6 +24,7 @@ from tvm import te
 from tvm import relay
 from tvm.contrib import util, ndk
 from tvm.topi import testing
+from tvm.topi.util import get_const_tuple
 
 def get_args():
     import argparse
@@ -521,6 +522,8 @@ def schedule_conv2d_1x1_WCHNc_CRSKk(data, filt, packed_data, packed_filter, conv
     # filt: (128, 1*1*128//4, 4) = (128, 32, 4)
     # conv: (56, 32, 56, 1, 4)
     s = te.create_schedule(conv.op)
+    cfg = autotvm.get_config()
+
     s[packed_data].compute_inline()
     s[packed_filter].compute_inline()
     A, B, C = packed_data, packed_filter, conv
@@ -540,48 +543,97 @@ def schedule_conv2d_1x1_WCHNc_CRSKk(data, filt, packed_data, packed_filter, conv
     copy_to_texture(At)
     copy_to_texture(Bt)
 
-
     _w, _ko, _h, _n, _ki = s[C].op.axis
+    kernel_scope, _n = s[C].split(_n, nparts=1)
+
+    #_kh, _kw, _c, _c4 = s[C].op.reduce_axis
+    # doesn't work as fused itervar has extent = -1
+    #_hn = s[C].fuse(_h, _n)
+
+    cfg.define_split("tile_f", _ko, num_outputs=4)
+    cfg.define_split("tile_w", _w, num_outputs=4)
+    cfg.define_split("tile_h", _h, num_outputs=4)
+    cfg.define_knob("auto_unroll_max_step", [0, 512, 1500])
+    cfg.define_knob("unroll_explicit", [0, 1])
+
+
+    bk, vk, tk, ki = cfg["tile_f"].apply(s, C, _ko)
+    bw, vw, tw, wi = cfg["tile_w"].apply(s, C, _w)
+    bh, vh, th, hi = cfg["tile_h"].apply(s, C, _h)
+    s[C].reorder(bh, _n, vh, th, hi)
+    bhn = s[C].fuse(bh, _n)
+
+    s[C].bind(bk, te.thread_axis("blockIdx.z"))
+    s[C].bind(bhn, te.thread_axis("blockIdx.y"))
+    s[C].bind(bw, te.thread_axis("blockIdx.x"))
+    s[C].bind(vk, te.thread_axis("vthread"))
+    s[C].bind(vh, te.thread_axis("vthread"))
+    s[C].bind(vw, te.thread_axis("vthread"))
+    s[C].bind(tk, te.thread_axis("threadIdx.z"))
+    s[C].bind(th, te.thread_axis("threadIdx.y"))
+    s[C].bind(tw, te.thread_axis("threadIdx.x"))
+    s[C].reorder(bw, bk, bhn, vw, vk, vh, tw, tk, th, ki, hi, wi, _ki)
     s[C].vectorize(_ki)
+
     # TODO(csullivan): Try uneven workgroup split
-    _wo, _wi = s[C].split(_w, factor=4)
-    _hn = s[C].fuse(_h, _n)
-    #_hno, _hni = s[C].split(_hn, factor=8)
-    #s[C].reorder(_wo, _wi, _ko, _hno, _hni, _ki)
-    s[C].reorder(_wo, _ko, _hn, _ki, _wi)
-    s[C].unroll(_wi)
+    # _wo, _wi = s[C].split(_w, factor=4)
+    # #_hno, _hni = s[C].split(_hn, factor=8)
+    # #s[C].reorder(_wo, _wi, _ko, _hno, _hni, _ki)
+    # s[C].reorder(_wo, _ko, _hn, _ki, _wi)
+    # s[C].unroll(_wi)
 
-    # mace:
-    # const int out_ch_blk = get_global_id(0);
-    # const int out_w_blk = get_global_id(1);
-    # const int out_hb = get_global_id(2);
+    # # mace:
+    # # const int out_ch_blk = get_global_id(0);
+    # # const int out_w_blk = get_global_id(1);
+    # # const int out_hb = get_global_id(2);
 
-    bx = te.thread_axis("blockIdx.x")
-    by = te.thread_axis("blockIdx.y")
-    bz = te.thread_axis("blockIdx.z")
-    s[C].bind(_ko, bx)
-    s[C].bind(_wo, by)
-    s[C].bind(_hn, bz)
+    # bx = te.thread_axis("blockIdx.x")
+    # by = te.thread_axis("blockIdx.y")
+    # bz = te.thread_axis("blockIdx.z")
+    # s[C].bind(_ko, bx)
+    # s[C].bind(_wo, by)
+    # s[C].bind(_hn, bz)
 
-    s[Cl].compute_at(s[C], _hn)
+    #s[Cl].compute_at(s[C], _hn)
+    s[Cl].compute_at(s[C], th)
+
     _wl, _kol, _hl, _nl, _kil = s[Cl].op.axis
     _khl, _kwl, _cl, _cl4 = s[Cl].op.reduce_axis
-    s[Cl].reorder(_cl, _cl4, _kil, _wl)
+
+    cfg.define_split("tile_c", _cl, num_outputs=2)
+    cfg.define_split("tile_kh", _khl, num_outputs=2)
+    cfg.define_split("tile_kw", _kwl, num_outputs=2)
+
+
+
+    _clo, _cli = cfg["tile_c"].apply(s, Cl, _cl)
+    _khlo, _khli = cfg["tile_kh"].apply(s, Cl, _khl)
+    _kwlo, _kwli = cfg["tile_kw"].apply(s, Cl, _kwl)
+    #s[OL].reorder(rco, ryo, rxo, rci, ryi, rxi, n, f, y, x)
+    s[Cl].reorder(_clo, _khlo, _kwlo, _cli, _cl4, _khli, _kwli, _kol, _hl, _nl, _kil, _wl)
+    #s[Cl].reorder(_clo, _khlo, _kwlo, _cli, _cl4, _khli, _kwli)
+    # s[Cl].reorder(_cl, _cl4, _kil, _wl)
     s[Cl].unroll(_cl4)
     s[Cl].unroll(_wl)
     s[Cl].vectorize(_kil)
 
 
     _wla, _cla, _hnla, _cl4a = s[Al].op.axis
-    s[Al].compute_at(s[Cl], _cl)
+    s[Al].compute_at(s[Cl], _cli)
     s[Al].vectorize(_cl4a)
     s[Al].unroll(_wla)
 
     _clb, _rskolb, _kilb = s[Bl].op.axis
-    s[Bl].compute_at(s[Cl], _cl)
+    s[Bl].compute_at(s[Cl], _cli)
     s[Bl].vectorize(_kilb)
     s[Bl].unroll(_clb)
 
+    s[C].pragma(kernel_scope, "auto_unroll_max_step", cfg["auto_unroll_max_step"].val)
+    s[C].pragma(kernel_scope, "unroll_explicit", cfg["unroll_explicit"].val)
+
+    WO, K, HO, N, K4 = get_const_tuple(C.shape)
+    RSC, _, _ = get_const_tuple(B.shape)
+    cfg.add_flop(2 * N * K * K4 * HO * WO * RSC)
 
     return s
 
