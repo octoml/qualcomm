@@ -25,6 +25,8 @@ from tvm import relay
 from tvm.contrib import util, ndk
 from tvm.topi import testing
 from tvm.topi.util import get_const_tuple
+from tvm.topi import nn
+from tvm.topi.mali import tile_and_bind3d
 
 def get_args():
     import argparse
@@ -638,6 +640,245 @@ def schedule_conv2d_1x1_WCHNc_CRSKk(data, filt, packed_data, packed_filter, conv
     return s
 
 
+def compute_conv2d_mali_NCHW_KCRS(cfg, data, kernel, strides, padding, dilation, out_dtype, num_tile):
+    """compute define for Conv2d Spatial Pack with NCHW layout"""
+    out_dtype = out_dtype or data.dtype
+    N, CI, IH, IW = get_const_tuple(data.shape)
+    if isinstance(N, tvm.tir.Any):
+        N = tvm.te.size_var("n")
+    if not isinstance(IH, int) or not isinstance(IW, int):
+        raise RuntimeError("ARM winograd conv2d doesn't support dynamic input height or width.")
+
+    if isinstance(dilation, int):
+        dilation_h = dilation_w = dilation
+    else:
+        dilation_h, dilation_w = dilation
+
+    if len(kernel.shape) == 4:
+        pre_packed = False
+        CO, _, KH, KW = get_const_tuple(kernel.shape)
+    else:  # kernel tensor is pre packed
+        pre_packed = True
+        CO, _, KH, KW, VC = get_const_tuple(kernel.shape)
+        CO = CO * VC
+
+    dilated_kernel_h = (KH - 1) * dilation_h + 1
+    dilated_kernel_w = (KW - 1) * dilation_w + 1
+    pad_top, pad_left, pad_bottom, pad_right = nn.get_pad_tuple(
+        padding, (dilated_kernel_h, dilated_kernel_w)
+    )
+    HSTR, WSTR = strides if isinstance(strides, (tuple, list)) else (strides, strides)
+    OH = (IH + pad_top + pad_bottom - dilated_kernel_h) // HSTR + 1
+    OW = (IW + pad_left + pad_right - dilated_kernel_w) // WSTR + 1
+    data_pad = nn.pad(data, [0, 0, pad_top, pad_left], [0, 0, pad_bottom, pad_right])
+
+    # ==================== define configuration space ====================
+    # TODO(@kevinthesun): Support tuning/optimization for dynamic shape.
+    n_tuning_axis = N if isinstance(N, int) else 1
+    n, co, oh, ow = cfg.axis(n_tuning_axis), cfg.axis(CO), cfg.axis(OH), cfg.axis(OW)
+    ci, kh, kw = cfg.reduce_axis(CI), cfg.reduce_axis(KH), cfg.reduce_axis(KW)
+
+    if num_tile == 2:  # for arm cpu
+        co, vc = cfg.define_split("tile_co", co, num_outputs=2)
+        oh, vh = cfg.define_split("tile_oh", oh, num_outputs=2)
+        ow, vw = cfg.define_split("tile_ow", ow, num_outputs=2)
+    elif num_tile == 3:  # for mali gpu
+        co, _, vc = cfg.define_split("tile_co", co, num_outputs=3)
+        oh, _, vh = cfg.define_split("tile_oh", oh, num_outputs=3)
+        ow, _, vw = cfg.define_split("tile_ow", ow, num_outputs=3)
+    else:
+        raise RuntimeError("Invalid num_tile")
+
+    cfg.define_reorder(
+        "reorder_0",
+        [n, co, oh, ow, ci, kh, kw, vh, vw, vc],
+        policy="candidate",
+        candidate=[
+            [n, co, oh, ow, ci, kh, kw, vh, vw, vc],
+            [n, co, oh, ow, ci, kh, kw, vc, vh, vw],
+        ],
+    )
+
+    cfg.define_annotate("ann_reduce", [kh, kw], policy="try_unroll")
+    cfg.define_annotate("ann_spatial", [vh, vw, vc], policy="try_unroll_vec")
+
+    # fallback support
+    if cfg.is_fallback:
+        if num_tile == 2:  # arm cpu
+            ref_log = autotvm.tophub.load_reference_log(
+                "arm_cpu", "rk3399", "conv2d_nchw_spatial_pack.arm_cpu"
+            )
+            cfg.fallback_with_reference_log(ref_log)
+        elif num_tile == 3:  # mali gpu
+            ref_log = autotvm.tophub.load_reference_log(
+                "mali", "rk3399", "conv2d_nchw_spatial_pack.mali"
+            )
+            cfg.fallback_with_reference_log(ref_log)
+    # ====================================================================
+
+    VC = cfg["tile_co"].size[-1]
+    VH = cfg["tile_oh"].size[-1]
+    VW = cfg["tile_ow"].size[-1]
+
+    kvshape = (CO // VC, CI, KH, KW, VC)
+    ovshape = (N, CO // VC, OH // VH, OW // VW, VH, VW, VC)
+    oshape = (N, CO, OH, OW)
+
+    if dilation_h != 1 or dilation_w != 1:
+        # undilate input data
+        dvshape = (N, OH // VH, OW // VW, CI, KH, KW, VH, VW)
+        data_vec = te.compute(
+            dvshape,
+            lambda n, h, w, ci, kh, kw, vh, vw: data_pad[n][ci][
+                (h * VH + vh) * HSTR + kh * dilation_h
+            ][(w * VW + vw) * WSTR + kw * dilation_w],
+            name="data_vec_undilated",
+        )
+    else:
+        dvshape = (N, OH // VH, OW // VW, CI, VH * HSTR + KH - 1, VW * WSTR + KW - 1)
+        data_vec = te.compute(
+            dvshape,
+            lambda n, h, w, ci, vh, vw: data_pad[n][ci][h * VH * HSTR + vh][w * VW * WSTR + vw],
+            name="data_vec",
+        )
+
+    if autotvm.GLOBAL_SCOPE.in_tuning:
+        # use "kernel_autotvm" instead of "kernel" to avoid naming conflict with OpenCL keyword
+        kernel_vec = tvm.te.placeholder(kvshape, kernel.dtype, name="kernel_autotvm")
+    else:
+        if pre_packed:
+            kernel_vec = kernel
+        else:
+            kernel_vec = te.compute(
+                kvshape,
+                lambda co, ci, kh, kw, vc: kernel[co * VC + vc][ci][kh][kw],
+                name="kernel_vec",
+            )
+
+    ci = te.reduce_axis((0, CI), name="ci")
+    kh = te.reduce_axis((0, KH), name="kh")
+    kw = te.reduce_axis((0, KW), name="kw")
+
+    if dilation_h != 1 or dilation_w != 1:
+        conv = te.compute(
+            ovshape,
+            lambda n, co, h, w, vh, vw, vc: te.sum(
+                data_vec[n, h, w, ci, kh, kw, vh, vw].astype(out_dtype)
+                * kernel_vec[co, ci, kh, kw, vc].astype(out_dtype),
+                axis=[ci, kh, kw],
+            ),
+            name="conv",
+        )
+    else:
+        conv = te.compute(
+            ovshape,
+            lambda n, co, h, w, vh, vw, vc: te.sum(
+                data_vec[n, h, w, ci, vh * HSTR + kh, vw * WSTR + kw].astype(out_dtype)
+                * kernel_vec[co, ci, kh, kw, vc].astype(out_dtype),
+                axis=[ci, kh, kw],
+            ),
+            name="conv",
+        )
+
+    idxdiv = tvm.tir.indexdiv
+    idxmod = tvm.tir.indexmod
+
+    output = te.compute(
+        oshape,
+        lambda n, co, h, w: conv[
+            n,
+            idxdiv(co, VC),
+            idxdiv(h, VH),
+            idxdiv(w, VW),
+            idxmod(h, VH),
+            idxmod(w, VW),
+            idxmod(co, VC),
+        ],
+        name="output_unpack",
+        tag="spatial_conv2d_output",
+    )
+    return data_vec, kernel_vec, output, conv
+
+
+def schedule_conv2d_mali_NCHW_KCRS(cfg, s, output, conv, data_vec, kernel_vec):
+    """schedule the spatial packing for conv2d"""
+    inputs = s[data_vec].op.input_tensors
+    if len(inputs) == 0:
+        data = data_vec
+    else:
+        data = inputs[0]
+
+    max_unroll = 16
+    vec_size = [1, 2, 4, 8, 16]
+    # get tunable parameters (they are defined in compute)
+    BC, TC, VC = cfg["tile_co"].size
+    BH, TH, VH = cfg["tile_oh"].size
+    BW, TW, VW = cfg["tile_ow"].size
+
+    # schedule padding
+    if isinstance(data.op, tvm.te.ComputeOp) and "pad" in data.op.tag:
+        data_pad = data
+        s[data_pad].compute_inline()
+
+    # schedule data packing
+    if isinstance(data_vec.op, tvm.te.ComputeOp) and data_vec.op.name == "data_vec_undilated":
+        _, h, w, ci, _, _, vh, vw = s[data_vec].op.axis
+    else:
+        _, h, w, ci, vh, vw = s[data_vec].op.axis
+    tile_and_bind3d(s, data_vec, h, w, ci, 1)
+    if vh.dom.extent.value < max_unroll:
+        s[data_vec].unroll(vh)
+    if vw.dom.extent.value < max_unroll:
+        s[data_vec].unroll(vw)
+
+    if isinstance(kernel_vec.op, tvm.te.ComputeOp) and kernel_vec.name == "kernel_vec":
+        if not autotvm.GLOBAL_SCOPE.in_tuning:
+            max_threads = tvm.target.Target.current(allow_none=False).max_num_threads
+            co, ci, kh, kw, vc = s[kernel_vec].op.axis
+            fused = s[kernel_vec].fuse(co, ci, kh, kw, vc)
+            fused, vec = s[kernel_vec].split(fused, VC)
+            bb, tt = s[kernel_vec].split(fused, max_threads)
+            s[kernel_vec].bind(bb, te.thread_axis("blockIdx.x"))
+            s[kernel_vec].bind(tt, te.thread_axis("threadIdx.x"))
+            if VC in vec_size:
+                s[kernel_vec].vectorize(vec)
+
+    # schedule convolution
+    n, c, h, w, vh, vw, vc = s[conv].op.axis
+    kc, kh, kw = s[conv].op.reduce_axis
+
+    cfg["reorder_0"].apply(s, conv, [n, c, h, w, kc, kh, kw, vh, vw, vc])
+    tile_and_bind3d(s, conv, c, h, w, TC, TH, TW)
+
+    cfg["ann_reduce"].apply(
+        s,
+        conv,
+        [kh, kw],
+        axis_lens=[nn.get_const_int(kernel_vec.shape[2]), nn.get_const_int(kernel_vec.shape[3])],
+        max_unroll=max_unroll,
+    )
+
+    cfg["ann_spatial"].apply(
+        s,
+        conv,
+        [vh, vw, vc],
+        axis_lens=[VH, VW, VC],
+        max_unroll=max_unroll,
+        vec_size=vec_size,
+        cfg=cfg,
+    )
+
+    # schedule output
+    if output.op not in s.outputs:  # has bias
+        s[output].compute_inline()
+        output = s.outputs[0]
+
+    _, co, oh, ow = s[output].op.axis
+    tile_and_bind3d(s, output, co, oh, ow, TC, TH, TW)
+
+    return s
+
+
 @autotvm.template("matmul_vector_accumulator_tune")
 def matmul_vector_acc_template(shapeA, shapeB):
     placeholders = compute_matmul_vector_accumulator(shapeA, shapeB)
@@ -655,6 +896,16 @@ def conv2d_1x1_WCHNc_CRSKk_template(input_shape, filter_shape):
     placeholders = compute_conv2d_1x1_WCHNc_CRSKk(input_shape, filter_shape)
     s = schedule_conv2d_1x1_WCHNc_CRSKk(*placeholders)
     return s, (placeholders[0], placeholders[1], placeholders[-1])
+
+@autotvm.template("conv2d_mali_NCHW_KCRS_tune")
+def conv2d_mali_NCHW_KCRS_template(input_shape, filter_shape):
+    cfg = autotvm.get_config()
+    data = te.placeholder(input_shape, name="data", dtype="float32")
+    filt = te.placeholder(filter_shape, name="filter", dtype="float32")
+    data_vec, filter_vec, output, conv = compute_conv2d_mali_NCHW_KCRS(cfg, data, filt, [1,1], [0,0], [0,0], "float32", num_tile=3)
+    s = te.create_schedule([x.op for x in [data_vec, filter_vec, output, conv]])
+    s = schedule_conv2d_mali_NCHW_KCRS(cfg, s, output, conv, data_vec, filter_vec)
+    return s, (data, filt, output)
 
 def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
     if args.test == "plus_one_rank3":
@@ -717,6 +968,10 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         elif args.test == "conv2d_1x1_WCHNc_CRSKk_tune":
             input_shape, filter_shape = (56, 128//4, 56, 1, 4), (128, 1, 1, 128//4, 4)
             s, placeholders = tune_and_bench(conv2d_1x1_WCHNc_CRSKk_template, args.test, input_shape, filter_shape)
+        elif args.test == "conv2d_mali_NCHW_KCRS_tune":
+            # NCHW, KCRS
+            input_shape, filter_shape = (1, 128, 56, 56), (128, 128, 1, 1)
+            s, placeholders = tune_and_bench(conv2d_mali_NCHW_KCRS_template, args.test, input_shape, filter_shape)
         else:
             raise RuntimeError("No test found with name: " + args.test)
     else:
@@ -775,6 +1030,8 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
         # nkhw -> nkkhw -> wkhnk
         np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(4, 1, 3, 0, 2)
+    elif args.test == "conv2d_mali_NCHW_KCRS_tune":
+        np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
 
     np.testing.assert_allclose(args_tvm[-1].asnumpy(), np_result, rtol=1e-3, atol=1e-3)
     print("validation done")
