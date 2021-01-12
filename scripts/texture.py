@@ -1050,6 +1050,290 @@ def schedule_conv2d_cuda_NCHW_KCRS(cfg, s, conv):
     if isinstance(N, int):
         cfg.add_flop(2 * N * OH * OW * CO * CI * KH * KW)
 
+def compute_group_conv2d_NCHWc_int8(
+    cfg, data, kernel, stride, padding, dilation, out_dtype="float32"
+):
+    """Convolution operator for 'conv2d_NCHWc_int8'.
+
+    Parameters
+    ----------
+    data : tvm.te.Tensor
+        4-D with shape [batch, in_channel, in_height, in_width] or
+        5-D with shape [batch, in_channel_chunk, in_height, in_width, in_channel_block]
+
+    kernel : tvm.te.Tensor
+        4-D with shape [num_filter, in_channel, filter_height, filter_width] or
+        6-D with shape [num_filter_chunk, in_channel_chunk, filter_height,
+        filter_width, num_filter_block, in_channel_block]
+
+    stride : int or a list/tuple of two ints
+        Stride size, or [stride_height, stride_width]
+
+    padding : int or str
+        Padding size, or ['VALID', 'SAME']
+
+    dilation : int or a list/tuple of two ints
+        dilation size, or [dilation_height, dilation_width]
+
+    out_dtype : str
+        The output type. This is used for mixed precision.
+
+    Returns
+    -------
+    Output : tvm.te.Tensor
+        5-D with shape [batch, out_channel, out_height, out_width, out_channel_block]
+    """
+    ic_block_factor = 4
+    oc_block_factor = 4
+
+    pre_computed = len(kernel.shape) == 6
+    if not pre_computed:
+        batch, channels, height, width = get_const_tuple(data.shape)
+        out_channels, in_channels, kernel_h, kernel_w = get_const_tuple(kernel.shape)
+
+        assert (
+            channels % ic_block_factor == 0
+        ), "Number of input channels must divide {}".format(ic_block_factor)
+        assert (
+            out_channels % oc_block_factor == 0
+        ), "Number of output channels must divide {}".format(oc_block_factor)
+
+        packed_data = te.compute(
+            (batch, channels // ic_block_factor, height, width, ic_block_factor),
+            lambda n, c, h, w, vc: data[n, c * ic_block_factor + vc, h, w],
+            name="packed_data",
+        )
+        packed_kernel = te.compute(
+            (
+                out_channels // oc_block_factor,
+                in_channels // ic_block_factor,
+                kernel_h,
+                kernel_w,
+                oc_block_factor,
+                ic_block_factor,
+            ),
+            lambda oc_chunk, ic_chunk, kh, kw, oc_block, ic_block: kernel[
+                oc_chunk * oc_block_factor + oc_block, ic_chunk * ic_block_factor + ic_block, kh, kw
+            ],
+            name="packed_kernel",
+        )
+    else:
+        packed_data = data
+        packed_kernel = kernel
+
+    batch, ic_chunk, in_height, in_width, _ = get_const_tuple(packed_data.shape)
+    oc_chunk, _, kernel_h, kernel_w, oc_block, ic_block = get_const_tuple(packed_kernel.shape)
+
+    if isinstance(stride, int):
+        stride_h = stride_w = stride
+    else:
+        stride_h, stride_w = stride
+
+    if isinstance(dilation, int):
+        dilation_h = dilation_w = dilation
+    else:
+        dilation_h, dilation_w = dilation
+
+    # pad the input data
+    pad_top, pad_left, pad_down, pad_right = nn.get_pad_tuple(padding, (kernel_h, kernel_w))
+    pad_before = [0, 0, pad_top, pad_left, 0]
+    pad_after = [0, 0, pad_down, pad_right, 0]
+    pad_data = nn.pad(packed_data, pad_before, pad_after, name="pad_data")
+
+    # compute the output shape
+    out_height = (in_height - (kernel_h - 1) * dilation_h - 1 + pad_top + pad_down) // stride_h + 1
+    out_width = (in_width - (kernel_w - 1) * dilation_w - 1 + pad_left + pad_right) // stride_w + 1
+
+    oshape = (batch, oc_chunk, out_height, out_width, oc_block)
+
+    icc = te.reduce_axis((0, ic_chunk), name="ic_chunk")
+    icb = te.reduce_axis((0, ic_block_factor), name="ic_block")
+    kh = te.reduce_axis((0, kernel_h), name="kh")
+    kw = te.reduce_axis((0, kernel_w), name="kw")
+
+    # NOTE(kumasento): explanation of this snippet -
+    # oc_chunk//groups and ic_chunk//groups give you the number of blocks,
+    # i.e., chunk, per group.
+    # occ is the ID of the output channel block, so that occ//(oc_chunk//groups)
+    # produces the ID of the group.
+    # Multiplying that result with ic_chunk//groups resulting in the ID
+    # of the beginning block of the corresponding input group.
+    # Adding the block offset (icc) will give you the exact block ID.
+    #
+    # Compared with a normal convolution, group convolution only sums
+    # input channels from the group that an output channel resides in.
+    conv = te.compute(
+        oshape,
+        lambda n, occ, oh, ow, ocb: te.sum(
+            pad_data[
+                n,
+                occ // (oc_chunk) * (ic_chunk) + icc,
+                oh * stride_h + kh * dilation_h,
+                ow * stride_w + kw * dilation_w,
+                icb,
+            ].astype(out_dtype)
+            * packed_kernel[occ, icc, kh, kw, ocb, icb].astype(out_dtype),
+            axis=[icc, kh, kw, icb],
+        ),
+    )
+
+    # Type conversion
+    output = te.compute(
+        oshape, lambda *index: conv(*index).astype(out_dtype), tag="group_conv2d_NCHWc_int8"
+    )
+
+    num_flop = (
+        batch
+        * oc_chunk
+        * oc_block
+        * out_height
+        * out_width
+        * ic_chunk
+        * ic_block
+        * kernel_h
+        * kernel_w
+        * 2
+    )
+    cfg.add_flop(num_flop)
+
+    return output
+
+
+def schedule_group_conv2d_NCHWc_int8(cfg, s, output):
+    """Schedule group conv2d int8 NCHWc template"""
+    groups = 1
+
+    conv = output.op.input_tensors[0]
+    packed_data, packed_kernel = conv.op.input_tensors
+
+    if isinstance(packed_data.op, tvm.te.ComputeOp) and "pad" in packed_data.op.tag:
+        pad_data = packed_data
+        packed_data = pad_data.op.input_tensors[0]
+    else:
+        pad_data = packed_data
+
+    if autotvm.GLOBAL_SCOPE.in_tuning:
+        # skip this part during tuning to make records accurate
+        # this part will be pre-computed during NNVM's pre-compute optimization pass
+        s[packed_data].pragma(s[packed_data].op.axis[0], "debug_skip_region")
+        s[packed_kernel].pragma(s[packed_kernel].op.axis[0], "debug_skip_region")
+    else:
+        if isinstance(packed_kernel.op, tvm.te.ComputeOp) and packed_kernel.name == "packed_kernel":
+            # data and kernel are not pre-computed, schedule layout transform here
+            schedule_injective_from_existing(s, packed_data)
+            schedule_injective_from_existing(s, packed_kernel)
+
+    if pad_data != packed_data:
+        s[pad_data].compute_inline()
+
+    # create cache stage
+    AA = s.cache_read(pad_data, "shared", [conv])
+    WW = s.cache_read(packed_kernel, "shared", [conv])
+
+    s[conv].set_scope("local")
+
+    # handle bias
+    if output.op not in s.outputs:
+        s[output].compute_inline()
+        output = s.outputs[0].output(0)
+
+    oc_chunk = nn.get_const_int(output.shape[1])
+    # tile and bind spatial axes
+    n, f, y, x, c = s[output].op.axis
+    cfg.define_split("tile_n", n, num_outputs=4)
+    cfg.define_split("tile_f", cfg.axis(oc_chunk), num_outputs=4)
+    cfg.define_split("tile_y", y, num_outputs=4)
+    cfg.define_split("tile_x", x, num_outputs=4)
+
+    # this is the scope to attach global config inside this kernel
+    kernel_scope, n = s[output].split(n, nparts=1)
+
+    s[output].bind(n, te.thread_axis("blockIdx.z"))
+    bn, vn, tn, ni = cfg["tile_n"].apply(s, output, n)
+    bf, vf, tf, fi = cfg["tile_f"].apply(s, output, f)
+    by, vy, ty, yi = cfg["tile_y"].apply(s, output, y)
+    bx, vx, tx, xi = cfg["tile_x"].apply(s, output, x)
+
+    s[output].reorder(bn, bf, by, bx, vn, vf, vy, vx, tn, tf, ty, tx, ni, fi, yi, xi)
+    s[output].bind(bn, te.thread_axis("blockIdx.z"))
+    #s[output].bind(s[output].fuse(bg, bf), te.thread_axis("blockIdx.y"))
+    s[output].bind(s[output].fuse(by, bx), te.thread_axis("blockIdx.x"))
+    s[output].bind(vn, te.thread_axis("vthread"))
+    s[output].bind(vf, te.thread_axis("vthread"))
+    s[output].bind(vy, te.thread_axis("vthread"))
+    s[output].bind(vx, te.thread_axis("vthread"))
+    cfg.define_knob("fuse_yx", [0, 1])  # fuse ty,tx or tn,tf
+    if cfg["fuse_yx"].val:
+        s[output].bind(tn, te.thread_axis("threadIdx.z"))
+        s[output].bind(tf, te.thread_axis("threadIdx.y"))
+        tyx = s[output].fuse(ty, tx)
+        s[output].bind(tyx, te.thread_axis("threadIdx.x"))
+        s[conv].compute_at(s[output], tyx)
+
+        # number of threads
+        n_tz = cfg["tile_n"].size[2]
+        n_ty = cfg["tile_f"].size[2]
+        n_tx = cfg["tile_y"].size[2] * cfg["tile_x"].size[2]
+    else:
+        s[output].bind(tn, te.thread_axis("threadIdx.z"))
+        s[output].bind(s[output].fuse(tn, tf), te.thread_axis("threadIdx.z"))
+        s[output].bind(ty, te.thread_axis("threadIdx.y"))
+        s[output].bind(tx, te.thread_axis("threadIdx.x"))
+        s[conv].compute_at(s[output], tx)
+
+        # number of threads
+        n_tz = cfg["tile_n"].size[2] * cfg["tile_f"].size[2]
+        n_ty = cfg["tile_y"].size[2]
+        n_tx = cfg["tile_x"].size[2]
+
+    # tile and bind reduction axes
+    n, f, y, x, c = s[conv].op.axis
+    rc, ry, rx, rc_block = s[conv].op.reduce_axis
+    cfg.define_split("tile_rc", cfg.axis(rc), num_outputs=2)
+    cfg.define_split("tile_ry", cfg.axis(ry), num_outputs=2)
+    cfg.define_split("tile_rx", cfg.axis(rx), num_outputs=2)
+    rco, rci = cfg["tile_rc"].apply(s, conv, rc)
+    ryo, ryi = cfg["tile_ry"].apply(s, conv, ry)
+    rxo, rxi = cfg["tile_rx"].apply(s, conv, rx)
+
+    s[conv].reorder(rco, ryo, rxo, rci, ryi, rxi, n, f, y, x, c, rc_block)
+    _, rc_block = s[conv].split(rc_block, factor=4)
+    #s[conv].tensorize(rc_block, _dp4a)
+
+    s[AA].compute_at(s[conv], rxo)
+    s[WW].compute_at(s[conv], rxo)
+
+    # cooperative fetching
+    for load in [AA, WW]:
+        c = s[load].op.axis[-1]
+        c_outer, c = s[load].split(c, factor=4)
+        s[load].vectorize(c)
+        fused = s[load].op.axis[:-1] + [c_outer]
+        fused = s[load].fuse(*fused)
+
+        fused, tx = s[load].split(fused, factor=n_tx)
+        fused, ty = s[load].split(fused, factor=n_ty)
+        fused, tz = s[load].split(fused, factor=n_tz)
+        s[load].bind(tz, te.thread_axis("threadIdx.z"))
+        s[load].bind(ty, te.thread_axis("threadIdx.y"))
+        s[load].bind(tx, te.thread_axis("threadIdx.x"))
+
+    # double buffer
+    # cfg.define_knob("AA_double_buffer", [0, 1])
+    # cfg.define_knob("WW_double_buffer", [0, 1])
+    # if cfg["AA_double_buffer"].val:
+    #     s[AA].double_buffer()
+    # if cfg["WW_double_buffer"].val:
+    #     s[WW].double_buffer()
+
+    # unroll
+    # cfg.define_knob("auto_unroll_max_step", [0, 512, 1500])
+    # s[output].pragma(kernel_scope, "auto_unroll_max_step", cfg["auto_unroll_max_step"].val)
+    # s[output].pragma(kernel_scope, "unroll_explicit", False)
+
+    return s
+
+
 @autotvm.template("matmul_vector_accumulator_tune")
 def matmul_vector_acc_template(shapeA, shapeB):
     placeholders = compute_matmul_vector_accumulator(shapeA, shapeB)
@@ -1087,6 +1371,16 @@ def conv2d_cuda_NCHW_KCRS_template(input_shape, filter_shape):
     s = te.create_schedule([x.op for x in [conv]])
     schedule_conv2d_cuda_NCHW_KCRS(cfg, s, conv)
     return s, (data, filt, conv)
+
+@autotvm.template("group_conv2d_cuda_NCHWc_KCRSkc_tune")
+def group_conv2d_cuda_NCHWc_KCRSkc_template(input_shape, filter_shape):
+    cfg = autotvm.get_config()
+    data = te.placeholder(input_shape, name="data", dtype="float32")
+    filt = te.placeholder(filter_shape, name="filter", dtype="float32")
+    output = compute_group_conv2d_NCHWc_int8(cfg, data, filt, [1,1], [0,0], [0,0], "float32")
+    s = te.create_schedule([x.op for x in [output]])
+    s = schedule_group_conv2d_NCHWc_int8(cfg, s, output)
+    return s, (data, filt, output)
 
 def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
     if args.test == "plus_one_rank3":
@@ -1157,6 +1451,10 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
             # NCHW, KCRS
             input_shape, filter_shape = (1, 128, 56, 56), (128, 128, 1, 1)
             s, placeholders = tune_and_bench(conv2d_cuda_NCHW_KCRS_template, args.test, input_shape, filter_shape)
+        elif args.test == "group_conv2d_cuda_NCHWc_KCRSkc_tune":
+            # NCHWc, KCRSkc
+            input_shape, filter_shape = (1, 32, 56, 56, 4), (32, 32, 1, 1, 4, 4)
+            s, placeholders = tune_and_bench(group_conv2d_cuda_NCHWc_KCRSkc_template, args.test, input_shape, filter_shape)
         else:
             raise RuntimeError("No test found with name: " + args.test)
     else:
@@ -1217,7 +1515,15 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(4, 1, 3, 0, 2)
     elif "NCHW_KCRS" in args.test:
         np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
-
+    elif args.test == "group_conv2d_cuda_NCHWc_KCRSkc_tune":
+        vec_length = args_np[1].shape[-1]
+        # nchwc -> nchw
+        args_np[0] = args_np[0].transpose((0, 1, 4, 2, 3)).reshape(args_np[0].shape[0], args_np[0].shape[1]*args_np[0].shape[-1], args_np[0].shape[2], args_np[0].shape[3])
+        # kcrskc -> kcrs
+        args_np[1] = args_np[1].transpose((0, 4, 1, 5, 2, 3)).reshape(args_np[1].shape[0] * args_np[1].shape[4], args_np[1].shape[1] * args_np[1].shape[5], args_np[1].shape[2], args_np[1].shape[3])
+        np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
+        # nkhw -> nkhwk
+        np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
     np.testing.assert_allclose(args_tvm[-1].asnumpy(), np_result, rtol=1e-3, atol=1e-3)
     print("validation done")
 
