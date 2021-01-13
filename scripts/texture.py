@@ -1050,10 +1050,10 @@ def schedule_conv2d_cuda_NCHW_KCRS(cfg, s, conv):
     if isinstance(N, int):
         cfg.add_flop(2 * N * OH * OW * CO * CI * KH * KW)
 
-def compute_group_conv2d_NCHWc_int8(
+def compute_conv2d_NCHWc_KCRSk(
     cfg, data, kernel, stride, padding, dilation, out_dtype="float32"
 ):
-    """Convolution operator for 'conv2d_NCHWc_int8'.
+    """Convolution operator for 'conv2d_NCHWc_KCRSk'.
 
     Parameters
     ----------
@@ -1086,7 +1086,7 @@ def compute_group_conv2d_NCHWc_int8(
     ic_block_factor = 4
     oc_block_factor = 4
 
-    pre_computed = len(kernel.shape) == 6
+    pre_computed = len(kernel.shape) == 5
     if not pre_computed:
         batch, channels, height, width = get_const_tuple(data.shape)
         out_channels, in_channels, kernel_h, kernel_w = get_const_tuple(kernel.shape)
@@ -1106,14 +1106,13 @@ def compute_group_conv2d_NCHWc_int8(
         packed_kernel = te.compute(
             (
                 out_channels // oc_block_factor,
-                in_channels // ic_block_factor,
+                in_channels,
                 kernel_h,
                 kernel_w,
-                oc_block_factor,
-                ic_block_factor,
+                oc_block_factor
             ),
-            lambda oc_chunk, ic_chunk, kh, kw, oc_block, ic_block: kernel[
-                oc_chunk * oc_block_factor + oc_block, ic_chunk * ic_block_factor + ic_block, kh, kw
+            lambda oc_chunk, ic, kh, kw, oc_block: kernel[
+                oc_chunk * oc_block_factor + oc_block, ic, kh, kw
             ],
             name="packed_kernel",
         )
@@ -1121,8 +1120,8 @@ def compute_group_conv2d_NCHWc_int8(
         packed_data = data
         packed_kernel = kernel
 
-    batch, ic_chunk, in_height, in_width, _ = get_const_tuple(packed_data.shape)
-    oc_chunk, _, kernel_h, kernel_w, oc_block, ic_block = get_const_tuple(packed_kernel.shape)
+    batch, ic_chunk, in_height, in_width, ic_block = get_const_tuple(packed_data.shape)
+    oc_chunk, _, kernel_h, kernel_w, oc_block = get_const_tuple(packed_kernel.shape)
 
     if isinstance(stride, int):
         stride_h = stride_w = stride
@@ -1151,35 +1150,24 @@ def compute_group_conv2d_NCHWc_int8(
     kh = te.reduce_axis((0, kernel_h), name="kh")
     kw = te.reduce_axis((0, kernel_w), name="kw")
 
-    # NOTE(kumasento): explanation of this snippet -
-    # oc_chunk//groups and ic_chunk//groups give you the number of blocks,
-    # i.e., chunk, per group.
-    # occ is the ID of the output channel block, so that occ//(oc_chunk//groups)
-    # produces the ID of the group.
-    # Multiplying that result with ic_chunk//groups resulting in the ID
-    # of the beginning block of the corresponding input group.
-    # Adding the block offset (icc) will give you the exact block ID.
-    #
-    # Compared with a normal convolution, group convolution only sums
-    # input channels from the group that an output channel resides in.
     conv = te.compute(
         oshape,
         lambda n, occ, oh, ow, ocb: te.sum(
             pad_data[
                 n,
-                occ // (oc_chunk) * (ic_chunk) + icc,
+                icc,
                 oh * stride_h + kh * dilation_h,
                 ow * stride_w + kw * dilation_w,
                 icb,
             ].astype(out_dtype)
-            * packed_kernel[occ, icc, kh, kw, ocb, icb].astype(out_dtype),
+            * packed_kernel[occ, icc * ic_block + icb, kh, kw, ocb].astype(out_dtype),
             axis=[icc, kh, kw, icb],
         ),
     )
 
     # Type conversion
     output = te.compute(
-        oshape, lambda *index: conv(*index).astype(out_dtype), tag="group_conv2d_NCHWc_int8"
+        oshape, lambda *index: conv(*index).astype(out_dtype), tag="conv2d_NCHWc_KCRSk"
     )
 
     num_flop = (
@@ -1199,9 +1187,8 @@ def compute_group_conv2d_NCHWc_int8(
     return output
 
 
-def schedule_group_conv2d_NCHWc_int8(cfg, s, output):
-    """Schedule group conv2d int8 NCHWc template"""
-    groups = 1
+def schedule_conv2d_NCHWc_KCRSk(cfg, s, output):
+    """Schedule conv2d NCHWc template"""
 
     conv = output.op.input_tensors[0]
     packed_data, packed_kernel = conv.op.input_tensors
@@ -1212,16 +1199,16 @@ def schedule_group_conv2d_NCHWc_int8(cfg, s, output):
     else:
         pad_data = packed_data
 
-    if autotvm.GLOBAL_SCOPE.in_tuning:
-        # skip this part during tuning to make records accurate
-        # this part will be pre-computed during NNVM's pre-compute optimization pass
-        s[packed_data].pragma(s[packed_data].op.axis[0], "debug_skip_region")
-        s[packed_kernel].pragma(s[packed_kernel].op.axis[0], "debug_skip_region")
-    else:
-        if isinstance(packed_kernel.op, tvm.te.ComputeOp) and packed_kernel.name == "packed_kernel":
-            # data and kernel are not pre-computed, schedule layout transform here
-            schedule_injective_from_existing(s, packed_data)
-            schedule_injective_from_existing(s, packed_kernel)
+    # if autotvm.GLOBAL_SCOPE.in_tuning:
+    #     # skip this part during tuning to make records accurate
+    #     # this part will be pre-computed during NNVM's pre-compute optimization pass
+    #     s[packed_data].pragma(s[packed_data].op.axis[0], "debug_skip_region")
+    #     s[packed_kernel].pragma(s[packed_kernel].op.axis[0], "debug_skip_region")
+    # else:
+    #     if isinstance(packed_kernel.op, tvm.te.ComputeOp) and packed_kernel.name == "packed_kernel":
+    #         # data and kernel are not pre-computed, schedule layout transform here
+    #         schedule_injective_from_existing(s, packed_data)
+    #         schedule_injective_from_existing(s, packed_kernel)
 
     if pad_data != packed_data:
         s[pad_data].compute_inline()
@@ -1297,7 +1284,7 @@ def schedule_group_conv2d_NCHWc_int8(cfg, s, output):
     rxo, rxi = cfg["tile_rx"].apply(s, conv, rx)
 
     s[conv].reorder(rco, ryo, rxo, rci, ryi, rxi, n, f, y, x, c, rc_block)
-    _, rc_block = s[conv].split(rc_block, factor=4)
+    #_, rc_block = s[conv].split(rc_block, factor=4)
     #s[conv].tensorize(rc_block, _dp4a)
 
     s[AA].compute_at(s[conv], rxo)
@@ -1305,10 +1292,11 @@ def schedule_group_conv2d_NCHWc_int8(cfg, s, output):
 
     # cooperative fetching
     for load in [AA, WW]:
-        c = s[load].op.axis[-1]
-        c_outer, c = s[load].split(c, factor=4)
-        s[load].vectorize(c)
-        fused = s[load].op.axis[:-1] + [c_outer]
+        fcd = s[load].op.axis[-1]
+        #fcd_outer, fcd = s[load].split(fcd, factor=4)
+        s[load].vectorize(fcd)
+        #fused = s[load].op.axis[:-1] + [fcd_outer]
+        fused = s[load].op.axis[:-1]
         fused = s[load].fuse(*fused)
 
         fused, tx = s[load].split(fused, factor=n_tx)
@@ -1372,14 +1360,14 @@ def conv2d_cuda_NCHW_KCRS_template(input_shape, filter_shape):
     schedule_conv2d_cuda_NCHW_KCRS(cfg, s, conv)
     return s, (data, filt, conv)
 
-@autotvm.template("group_conv2d_cuda_NCHWc_KCRSkc_tune")
-def group_conv2d_cuda_NCHWc_KCRSkc_template(input_shape, filter_shape):
+@autotvm.template("conv2d_cuda_NCHWc_KCRSk_tune")
+def conv2d_cuda_NCHWc_KCRSk_template(input_shape, filter_shape):
     cfg = autotvm.get_config()
     data = te.placeholder(input_shape, name="data", dtype="float32")
     filt = te.placeholder(filter_shape, name="filter", dtype="float32")
-    output = compute_group_conv2d_NCHWc_int8(cfg, data, filt, [1,1], [0,0], [0,0], "float32")
+    output = compute_conv2d_NCHWc_KCRSk(cfg, data, filt, [1,1], [0,0], [0,0], "float32")
     s = te.create_schedule([x.op for x in [output]])
-    s = schedule_group_conv2d_NCHWc_int8(cfg, s, output)
+    s = schedule_conv2d_NCHWc_KCRSk(cfg, s, output)
     return s, (data, filt, output)
 
 def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
@@ -1413,7 +1401,7 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         s = schedule5d(*placeholders)
     elif "tune" in args.test:
         options = {
-            "log_filename": "test_tune.log",
+            "log_filename": "test_tune.log2", #args.test + ".autotvm.log",
             "early_stopping": None,
             "measure_option": autotvm.measure_option(
                 builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=1000),
@@ -1451,10 +1439,10 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
             # NCHW, KCRS
             input_shape, filter_shape = (1, 128, 56, 56), (128, 128, 1, 1)
             s, placeholders = tune_and_bench(conv2d_cuda_NCHW_KCRS_template, args.test, input_shape, filter_shape)
-        elif args.test == "group_conv2d_cuda_NCHWc_KCRSkc_tune":
-            # NCHWc, KCRSkc
-            input_shape, filter_shape = (1, 32, 56, 56, 4), (32, 32, 1, 1, 4, 4)
-            s, placeholders = tune_and_bench(group_conv2d_cuda_NCHWc_KCRSkc_template, args.test, input_shape, filter_shape)
+        elif args.test == "conv2d_cuda_NCHWc_KCRSk_tune":
+            # NCHWc, KCRSk
+            input_shape, filter_shape = (1, 32, 56, 56, 4), (32, 128, 1, 1, 4)
+            s, placeholders = tune_and_bench(conv2d_cuda_NCHWc_KCRSk_template, args.test, input_shape, filter_shape)
         else:
             raise RuntimeError("No test found with name: " + args.test)
     else:
@@ -1515,12 +1503,12 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(4, 1, 3, 0, 2)
     elif "NCHW_KCRS" in args.test:
         np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
-    elif args.test == "group_conv2d_cuda_NCHWc_KCRSkc_tune":
+    elif args.test == "conv2d_cuda_NCHWc_KCRSk_tune":
         vec_length = args_np[1].shape[-1]
         # nchwc -> nchw
         args_np[0] = args_np[0].transpose((0, 1, 4, 2, 3)).reshape(args_np[0].shape[0], args_np[0].shape[1]*args_np[0].shape[-1], args_np[0].shape[2], args_np[0].shape[3])
-        # kcrskc -> kcrs
-        args_np[1] = args_np[1].transpose((0, 4, 1, 5, 2, 3)).reshape(args_np[1].shape[0] * args_np[1].shape[4], args_np[1].shape[1] * args_np[1].shape[5], args_np[1].shape[2], args_np[1].shape[3])
+        # kcrsk -> kcrs
+        args_np[1] = args_np[1].transpose((0, 4, 1, 2, 3)).reshape(args_np[1].shape[0] * args_np[1].shape[4], args_np[1].shape[1], args_np[1].shape[2], args_np[1].shape[3])
         np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
         # nkhw -> nkhwk
         np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
