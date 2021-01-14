@@ -35,7 +35,7 @@ def get_args():
     # parser.add_argument('-e', '--evaluate', action="store_true", help='Whether to evaluate the kernel and schedule.')
     # parser.add_argument('-v', '--verify', action="store_false", help='Whether to verify numerical results of evaluation.')
     # parser.add_argument('-B', '--batch_size', type=int, help='Batch size to use in batched gemm computation')
-    parser.add_argument('-m', '--memory', type=str, default="texture", help='Use global or texture')
+    parser.add_argument('-m', '--memory', type=str, default=None, help='Use global or texture')
     parser.add_argument('-t', '--test', type=str, required=True, help='Selected test to run')
     # parser.add_argument('-N', type=int, help='Size of N for matrix B (KxN)')
     # parser.add_argument('-K', type=int, help='Size of reduction axis K')
@@ -993,7 +993,6 @@ def schedule_conv2d_cuda_NCHW_KCRS(cfg, s, conv):
         s[conv].set_scope("local")
         OL = conv
 
-    # create cache stage
     AA = s.cache_read(pad_data, "shared", [OL])
     WW = s.cache_read(kernel, "shared", [OL])
 
@@ -1088,17 +1087,43 @@ def compute_conv2d_NCHWc_KCRSk_tx(Input, Filter, stride, padding, dilation, out_
     rcb = te.reduce_axis((0, in_channel_block), name="rc")
     ry = te.reduce_axis((0, kernel_h), name="ry")
     rx = te.reduce_axis((0, kernel_w), name="rx")
-    return te.compute(
-        (batch, num_filter_chunk, out_height, out_width, num_filter_block),
-        lambda nn, ffc, yy, xx, ffb: te.sum(
-            temp[nn, rcc, yy * stride_h + ry * dilation_h, xx * stride_w + rx * dilation_w, rcb].astype(
-                out_dtype
-            )
-            * Filter[ffc, rcc * in_channel_block + rcb, ry, rx, ffb].astype(out_dtype),
-            axis=[rcc, rcb, ry, rx],
-        ),
-        tag="conv2d_nchwc_kcrsk",
-    )
+
+    if args.memory == "texture":
+        # NCHWc x KCRSk
+        # texture: NCH|W|c
+        # texture: K|CRS|k
+        # c = crs//RS
+        # rs = crs % RS
+        # r = rs // W == (crs // S) % R
+        # s = rs % W == crs % S
+        Filter_tx = te.compute(
+            (num_filter_chunk, channel * kernel_h * kernel_w, num_filter_block),
+            lambda ffc, crs, ffb: Filter[ffc, crs // (kernel_h * kernel_w), (crs // kernel_w) % kernel_h, crs % kernel_w, ffb],
+            name = "packed_filter"
+        )
+        return te.compute(
+            (batch, num_filter_chunk, out_height, out_width, num_filter_block),
+            lambda nn, ffc, yy, xx, ffb: te.sum(
+                temp[nn, rcc, yy * stride_h + ry * dilation_h, xx * stride_w + rx * dilation_w, rcb].astype(
+                    out_dtype
+                )
+                * Filter_tx[ffc, ((rcc * in_channel_block + rcb)*kernel_h + ry)*kernel_w + rx, ffb].astype(out_dtype),
+                axis=[rcc, rcb, ry, rx],
+            ),
+            tag="conv2d_nchwc_kcrsk_texture",
+        )
+    else:
+        return te.compute(
+            (batch, num_filter_chunk, out_height, out_width, num_filter_block),
+            lambda nn, ffc, yy, xx, ffb: te.sum(
+                temp[nn, rcc, yy * stride_h + ry * dilation_h, xx * stride_w + rx * dilation_w, rcb].astype(
+                    out_dtype
+                )
+                * Filter[ffc, rcc * in_channel_block + rcb, ry, rx, ffb].astype(out_dtype),
+                axis=[rcc, rcb, ry, rx],
+            ),
+            tag="conv2d_nchwc_kcrsk",
+        )
 
 def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
     """schedule optimized for batch size = 1"""
@@ -1121,11 +1146,18 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
         cfg.define_knob("unroll_explicit", [0, 1])
     ##### space definition end #####
 
-    pad_data, kernel = s[conv].op.input_tensors
+    if args.memory == "texture":
+        pad_data, flattened_kernel = s[conv].op.input_tensors
+        kernel = s[flattened_kernel].op.input_tensors[0]
+        s[flattened_kernel].compute_inline()
+    else:
+        pad_data, kernel = s[conv].op.input_tensors
+        flattened_kernel = kernel
 
     s[pad_data].compute_inline()
     if isinstance(kernel.op, tvm.te.ComputeOp) and "dilate" in kernel.op.tag:
         s[kernel].compute_inline()
+    kernel = flattened_kernel
 
     if conv.op in s.outputs:
         output = conv
@@ -1180,8 +1212,12 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
 
     # cooperative fetching
     for load in [AA, WW]:
-        n, f, y, x, v = s[load].op.axis
-        fused = s[load].fuse(n, f, y, x)
+        if args.memory == "texture" and load == WW:
+            n, fyx, v = s[load].op.axis
+            fused = s[load].fuse(n, fyx)
+        else:
+            n, f, y, x, v = s[load].op.axis
+            fused = s[load].fuse(n, f, y, x)
         tz, fused = s[load].split(fused, nparts=cfg["tile_fc"].size[2])
         ty, fused = s[load].split(fused, nparts=cfg["tile_y"].size[2])
         tx, fused = s[load].split(fused, nparts=cfg["tile_x"].size[2])
@@ -1195,10 +1231,15 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
     s[output].pragma(kernel_scope, "unroll_explicit", cfg["unroll_explicit"].val)
 
     N, OCC, OH, OW, OCB = get_const_tuple(output.shape)
-    _, KH, KW, IC, _ = get_const_tuple(kernel.shape)
+    if args.memory == "texture":
+        _, ICKHKW, _ = get_const_tuple(kernel.shape)
+    else:
+        _, IC, KH, KW, _ = get_const_tuple(kernel.shape)
+        ICKHKW = IC*KH*KW
+
 
     if isinstance(N, int):
-        cfg.add_flop(2 * N * OH * OW * OCC * OCB * IC * KH * KW)
+        cfg.add_flop(2 * N * OH * OW * OCC * OCB * ICKHKW)
 
 
 def compute_conv2d_NCHWc_KCRSk(
