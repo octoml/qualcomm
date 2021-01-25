@@ -179,30 +179,21 @@ class TVM_DLL DeviceAPI {
   virtual void FreeWorkspace(TVMContext ctx, void* ptr);
 
   /*!
-   * \brief Allocate temporal workspace for backend execution.
-   *
-   *  \note We have the following assumption about backend temporal
-   *   workspace allocation, and backend will optimize for such assumption:
-   *
-   *  - Only a few allocation will happen, and space will be released after use.
-   *  - The release order is usually in reverse order of allocate (stack style).
-   *  - Repeative pattern of same allocations over different runs.
-   *  - Workspace should not overlap between different threads(i.e. be threadlocal)
-   *
-   * \param ctx The context of allocation.
-   * \param nbytes The size to be allocated.
-   * \param type_hint The type of elements. Only needed by certain backends such
-   * as OpenGL, as nbytes is sufficient for most backends.
+   * TODO(csullivan): Needs docs
    */
   virtual void* AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint = {});
   /*!
-   * \brief Free temporal workspace in backend execution.
-   *
-   * \param ctx The context of allocation.
-   * \param ptr The pointer to be freed.
+   * TODO(csullivan): Needs docs
    */
   virtual void FreeTexture(TVMContext ctx, void* ptr);
-
+  /*!
+   * TODO(csullivan): Needs docs
+   */
+  virtual void* AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint = {});
+  /*!
+   * TODO(csullivan): Needs docs
+   */
+  virtual void FreeTextureWorkspace(TVMContext ctx, void* ptr);
   /*!
    * \brief Get device API based on context.
    * \param ctx The context
