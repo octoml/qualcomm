@@ -55,6 +55,7 @@
 #include "../meta_data.h"
 #include "../pack_args.h"
 #include "../thread_storage_scope.h"
+#include "../texture_pool.h"
 #include "../workspace_pool.h"
 
 namespace tvm {
@@ -240,6 +241,8 @@ class OpenCLWorkspace : public DeviceAPI {
   void FreeWorkspace(TVMContext ctx, void* data) final;
   void* AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) final;
   void FreeTexture(TVMContext ctx, void* data) final;
+  void* AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) final;
+  void FreeTextureWorkspace(TVMContext ctx, void* data) final;
 
   /*!
    * \brief Get the thread local ThreadEntry
@@ -266,8 +269,11 @@ class OpenCLThreadEntry {
   std::vector<KTEntry> kernel_table;
   /*! \brief workspace pool */
   WorkspacePool pool;
+  /*! \brief texture pool */
+  TexturePool texture_pool;
   // constructor
-  OpenCLThreadEntry(DLDeviceType device_type, DeviceAPI* device) : pool(device_type, device) {
+  OpenCLThreadEntry(DLDeviceType device_type, DeviceAPI* device)
+    : pool(device_type, device), texture_pool(device_type, device) {
     context.device_id = 0;
     context.device_type = device_type;
   }
