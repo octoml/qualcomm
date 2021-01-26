@@ -22,9 +22,9 @@ import tvm.script
 from tvm import autotvm
 from tvm import te
 from tvm import relay
-from tvm.contrib import util, ndk
+from tvm.contrib import utils, ndk
 from tvm.topi import testing
-from tvm.topi.util import get_const_tuple, simplify
+from tvm.topi.utils import get_const_tuple, simplify
 from tvm.topi import nn
 from tvm.topi.mali import tile_and_bind3d
 
@@ -86,7 +86,7 @@ def tune_tasks(
         tasks,
         measure_option,
         tuner="xgb",
-        n_trial=1024,
+        n_trial=4096,
         early_stopping=None,
         log_filename="tuning.log",
         use_transfer_learning=True,
@@ -1088,7 +1088,7 @@ def compute_conv2d_NCHWc_KCRSk_tx(Input, Filter, stride, padding, dilation, out_
     ry = te.reduce_axis((0, kernel_h), name="ry")
     rx = te.reduce_axis((0, kernel_w), name="rx")
 
-    if args.memory == "texture":
+    if args.memory != None:
         # NCHWc x KCRSk
         # texture: NCH|W|c
         # texture: K|CRS|k
@@ -1146,7 +1146,7 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
         cfg.define_knob("unroll_explicit", [0, 1])
     ##### space definition end #####
 
-    if args.memory == "texture":
+    if args.memory != None:
         pad_data, flattened_kernel = s[conv].op.input_tensors
         kernel = s[flattened_kernel].op.input_tensors[0]
         s[flattened_kernel].compute_inline()
@@ -1168,14 +1168,28 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
         OL = conv
 
     # create cache stage
-    if args.memory == "texture":
-        pass
+    if args.memory != None:
+        AT = s.cache_read(pad_data, args.memory, [OL])
+        WT = s.cache_read(kernel, args.memory, [OL])
+        def copy_to_texture(stage):
+            axes = s[stage].op.axis
+            fused = s[stage].fuse(*axes[:-1])
+            block, thread = s[stage].split(fused, factor=32)
+            s[stage].vectorize(axes[-1])
+            s[stage].bind(block, te.thread_axis("blockIdx.x"))
+            s[stage].bind(thread, te.thread_axis("threadIdx.x"))
+        copy_to_texture(AT)
+        copy_to_texture(WT)
 
-    AA = s.cache_read(pad_data, "shared", [OL])
-    WW = s.cache_read(kernel, "shared", [OL])
+        AA = s.cache_read(AT, "shared", [OL])
+        WW = s.cache_read(WT, "shared", [OL])
+    else:
+        AA = s.cache_read(pad_data, "shared", [OL])
+        WW = s.cache_read(kernel, "shared", [OL])
 
     # tile and bind spatial axes
     n, fc, y, x, fb = s[output].op.axis
+
     kernel_scope, n = s[output].split(n, nparts=1)
 
     bf, vf, tf, fi = cfg["tile_fc"].apply(s, output, fc)
@@ -1212,7 +1226,7 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
 
     # cooperative fetching
     for load in [AA, WW]:
-        if args.memory == "texture" and load == WW:
+        if args.memory != None and load == WW:
             n, fyx, v = s[load].op.axis
             fused = s[load].fuse(n, fyx)
         else:
@@ -1231,7 +1245,7 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
     s[output].pragma(kernel_scope, "unroll_explicit", cfg["unroll_explicit"].val)
 
     N, OCC, OH, OW, OCB = get_const_tuple(output.shape)
-    if args.memory == "texture":
+    if args.memory != None:
         _, ICKHKW, _ = get_const_tuple(kernel.shape)
     else:
         _, IC, KH, KW, _ = get_const_tuple(kernel.shape)
@@ -1562,15 +1576,22 @@ def conv2d_cuda_NCHWc_KCRSk_template(input_shape, filter_shape):
     s = schedule_conv2d_NCHWc_KCRSk(cfg, s, output)
     return s, (data, filt, output)
 
-@autotvm.template("conv2d_NCHWc_KCRSk_tx_tune")
-def conv2d_NCHWc_KCRSk_tx_template(input_shape, filter_shape):
+def conv2d_NCHWc_KCRSk_tx_template_impl(input_shape, filter_shape):
     data = te.placeholder(input_shape, name="data", dtype="float32")
     filt = te.placeholder(filter_shape, name="filter", dtype="float32")
-    conv = compute_conv2d_NCHWc_KCRSk_tx(data, filt, [1,1], [0,0], [0,0], "float32")
+    conv = compute_conv2d_NCHWc_KCRSk_tx(data, filt, [1,1], [0,0], [1,1], "float32")
     cfg = autotvm.get_config()
     s = te.create_schedule([x.op for x in [conv]])
     schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv)
     return s, (data, filt, conv)
+
+@autotvm.template("conv2d_NCHWc_KCRSk_tx_tune")
+def conv2d_NCHWc_KCRSk_tx_template(input_shape, filter_shape):
+    return conv2d_NCHWc_KCRSk_tx_template_impl(input_shape, filter_shape)
+
+@autotvm.template("conv2d_NCHWc_KCRSk_tx_tune2")
+def conv2d_NCHWc_KCRSk_tx_template2(input_shape, filter_shape):
+    return conv2d_NCHWc_KCRSk_tx_template_impl(input_shape, filter_shape)
 
 
 def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
@@ -1603,8 +1624,10 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         placeholders = compute5d(shape)
         s = schedule5d(*placeholders)
     elif "tune" in args.test:
+        logfilename = args.test + "." + str(args.memory + "." if args.memory != None else "") + "autotvm.log"
+        print("Logfile: ", logfilename)
         options = {
-            "log_filename": "test_tune.log2", #args.test + ".autotvm.log",
+            "log_filename": logfilename,
             "early_stopping": None,
             "measure_option": autotvm.measure_option(
                 builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=1000),
@@ -1612,8 +1635,10 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
                     args.rpc_key,
                     host=args.rpc_tracker_host,
                     port=args.rpc_tracker_port,
-                    number=5,
+                    number=3,
                     timeout=1000,
+                    #min_repeat_ms=150,
+                    #cooldown_interval=150
                 ),
             )
         }
@@ -1650,6 +1675,12 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
             # NCHWc, KCRSk
             input_shape, filter_shape = (1, 32, 56, 56, 4), (32, 128, 1, 1, 4)
             s, placeholders = tune_and_bench(conv2d_NCHWc_KCRSk_tx_template, args.test, input_shape, filter_shape)
+        elif args.test == "conv2d_NCHWc_KCRSk_tx_tune2":
+            # NCHWc, KCRSk
+            #input_shape, filter_shape = (1, 32, 56, 56, 4), (32, 128, 3, 3, 4)
+            #input_shape, filter_shape = (1, 32, 56, 56, 4), (64, 128, 3, 3, 4)
+            input_shape, filter_shape = (1, 32, 112, 112, 4), (32, 128, 3, 3, 4)
+            s, placeholders = tune_and_bench(conv2d_NCHWc_KCRSk_tx_template2, args.test, input_shape, filter_shape)
         else:
             raise RuntimeError("No test found with name: " + args.test)
     else:
@@ -1659,7 +1690,7 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
     print("tvm.lower:\n", result)
 
     func = tvm.driver.build(s, [*placeholders], target=target, target_host=target_host, name="TestFunction")
-    temp = util.tempdir()
+    temp = utils.tempdir()
     dso_binary = "dev_lib_cl.so"
     dso_binary_path = temp.relpath(dso_binary)
     func.export_library(dso_binary_path, ndk.create_shared)
@@ -1678,8 +1709,9 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         args_np.append(var_np)
         args_tvm.append(tvm.nd.array(var_np, ctx))
     args_tvm.append(tvm.nd.array(np.zeros([i.value for i in placeholders[-1].shape], dtype=placeholders[-1].dtype), ctx))
+
     func(*args_tvm)
-    evaluator = func.time_evaluator(func.entry_name, ctx, number=10)
+    evaluator = func.time_evaluator(func.entry_name, ctx, number=100)
     print("time:", "%f ms" % (evaluator(*args_tvm).mean * 1e3))
     if "plus_one" in args.test:
         np_result = args_np[0] + 1.0;

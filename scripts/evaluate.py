@@ -18,7 +18,7 @@ import os
 import tvm
 from tvm import relay
 from tvm import autotvm
-from tvm.contrib import util, ndk
+from tvm.contrib import utils, ndk
 
 
 class ModelImporter(object):
@@ -413,7 +413,7 @@ class Executor(object):
 
         if self.remote:
             print("Using Android OpenCL runtime over RPC")
-            temp = util.tempdir()
+            temp = utils.tempdir()
             dso_binary = "dev_lib_cl.so"
             dso_binary_path = temp.relpath(dso_binary)
             if "opencl" in target:
