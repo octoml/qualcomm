@@ -1,6 +1,6 @@
 # Qualcomm TVM Evaluation Repo
 
-***Disclaimer: This is in progress development code and does not reflect the productized final state that will be upstreamed. Some important features are missing and some refactoring is required.
+***Disclaimer: This is in progress development code and does not reflect the productized final state that will be upstreamed. Some important features are missing and some refactoring is required. All code herein is subject to change.
 
 
 Last version of TVM this was evaluated on and worked (01/28/2021): `6f75cffb64f20e72a2fad425ce58d0fd32c0d4c8`.
