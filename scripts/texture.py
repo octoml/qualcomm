@@ -36,6 +36,9 @@ def get_args():
     # parser.add_argument('-v', '--verify', action="store_false", help='Whether to verify numerical results of evaluation.')
     # parser.add_argument('-B', '--batch_size', type=int, help='Batch size to use in batched gemm computation')
     parser.add_argument('-m', '--memory', type=str, default=None, help='Use global or texture')
+    parser.add_argument('-s', '--shared', action="store_true", help='Use shared memory')
+    parser.add_argument('-l', '--log', type=str, default=None, help='AutoTVM tuning record logfile')
+    parser.add_argument('-T', '--tune', action="store_true", help='Whether to tune or not')
     parser.add_argument('-t', '--test', type=str, required=True, help='Selected test to run')
     # parser.add_argument('-N', type=int, help='Size of N for matrix B (KxN)')
     # parser.add_argument('-K', type=int, help='Size of reduction axis K')
@@ -65,7 +68,6 @@ def get_args():
 
 args = get_args()
 
-
 def get_remote():
     from tvm import rpc
     print(
@@ -81,12 +83,12 @@ def get_remote():
     return tracker, remote
 
 # TODO(csullivan): Improve executor class to be able to consume input values
-# and return outputs, then refactor to use Executor in this test file
+# and return outputs, then refactor to use evaluate.py:Executor in this test file
 def tune_tasks(
         tasks,
         measure_option,
         tuner="xgb",
-        n_trial=4096,
+        n_trial=2048,
         early_stopping=None,
         log_filename="tuning.log",
         use_transfer_learning=True,
@@ -490,6 +492,12 @@ def compute_conv2d_1x1_WCHNc_CRSKk(input_shape, filter_shape):
         name = "packed_data"
     )
 
+    # Logical transformation of Nd -> 3d tensor
+    # CRSKk -> C|RSK|k
+    # r = rsk // SK
+    # sk = rsk % SK
+    # s = sk // K == (rsk % SK) // K == (rsk // K) % S
+    # k = sk % K == (rsk % SK) % K == rsk % K
     packed_filter = te.compute(
         (filter_shape[0], filter_shape[1] * filter_shape[2] * filter_shape[3], filter_shape[4]),
         lambda i, j, k: filt[i, j//(filter_shape[3] * filter_shape[2]), (j//filter_shape[3])%filter_shape[2], j%filter_shape[3], k],
@@ -523,6 +531,7 @@ def schedule_conv2d_1x1_WCHNc_CRSKk(data, filt, packed_data, packed_filter, conv
     # data: (56, 128//4, 56*1, 4) = (56, 32, 56, 4)
     # filt: (128, 1*1*128//4, 4) = (128, 32, 4)
     # conv: (56, 32, 56, 1, 4)
+
     s = te.create_schedule(conv.op)
     cfg = autotvm.get_config()
 
@@ -547,10 +556,6 @@ def schedule_conv2d_1x1_WCHNc_CRSKk(data, filt, packed_data, packed_filter, conv
 
     _w, _ko, _h, _n, _ki = s[C].op.axis
     kernel_scope, _n = s[C].split(_n, nparts=1)
-
-    #_kh, _kw, _c, _c4 = s[C].op.reduce_axis
-    # doesn't work as fused itervar has extent = -1
-    #_hn = s[C].fuse(_h, _n)
 
     cfg.define_split("tile_f", _ko, num_outputs=4)
     cfg.define_split("tile_w", _w, num_outputs=4)
@@ -935,6 +940,7 @@ def compute_conv2d_cuda_NCHW_KCRS(Input, Filter, stride, padding, dilation, out_
     pad_before = [0, 0, pad_top, pad_left]
     pad_after = [0, 0, pad_down, pad_right]
     temp = nn.pad(Input, pad_before, pad_after, name="pad_temp")
+
     rc = te.reduce_axis((0, in_channel), name="rc")
     ry = te.reduce_axis((0, kernel_h), name="ry")
     rx = te.reduce_axis((0, kernel_w), name="rx")
@@ -1181,8 +1187,9 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
         copy_to_texture(AT)
         copy_to_texture(WT)
 
-        AA = s.cache_read(AT, "shared", [OL])
-        WW = s.cache_read(WT, "shared", [OL])
+        if args.shared:
+            AA = s.cache_read(AT, "shared", [OL])
+            WW = s.cache_read(WT, "shared", [OL])
     else:
         AA = s.cache_read(pad_data, "shared", [OL])
         WW = s.cache_read(kernel, "shared", [OL])
@@ -1212,33 +1219,35 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
 
     # tile reduction axes
     n, fc, y, x, fb = s[OL].op.axis
+
     rcc, rcb, ry, rx = s[OL].op.reduce_axis
     rco, rci = cfg["tile_rcc"].apply(s, OL, rcc)
     ryo, ryi = cfg["tile_ry"].apply(s, OL, ry)
     rxo, rxi = cfg["tile_rx"].apply(s, OL, rx)
+
     # TODO(csullivan): check position of rcb
     s[OL].reorder(rco, ryo, rxo, rci, ryi, rxi, rcb, n, fc, y, x, fb)
     s[OL].vectorize(fb)
     s[OL].unroll(rcb)
 
-    s[AA].compute_at(s[OL], rxo)
-    s[WW].compute_at(s[OL], rxo)
-
-    # cooperative fetching
-    for load in [AA, WW]:
-        if args.memory != None and load == WW:
-            n, fyx, v = s[load].op.axis
-            fused = s[load].fuse(n, fyx)
-        else:
-            n, f, y, x, v = s[load].op.axis
-            fused = s[load].fuse(n, f, y, x)
-        tz, fused = s[load].split(fused, nparts=cfg["tile_fc"].size[2])
-        ty, fused = s[load].split(fused, nparts=cfg["tile_y"].size[2])
-        tx, fused = s[load].split(fused, nparts=cfg["tile_x"].size[2])
-        s[load].bind(tz, te.thread_axis("threadIdx.z"))
-        s[load].bind(ty, te.thread_axis("threadIdx.y"))
-        s[load].bind(tx, te.thread_axis("threadIdx.x"))
-        s[load].vectorize(v)
+    if args.memory == None or args.shared:
+        s[AA].compute_at(s[OL], rxo)
+        s[WW].compute_at(s[OL], rxo)
+        # cooperative fetching
+        for load in [AA, WW]:
+            if args.memory != None and load == WW:
+                n, fyx, v = s[load].op.axis
+                fused = s[load].fuse(n, fyx)
+            else:
+                n, f, y, x, v = s[load].op.axis
+                fused = s[load].fuse(n, f, y, x)
+            tz, fused = s[load].split(fused, nparts=cfg["tile_fc"].size[2])
+            ty, fused = s[load].split(fused, nparts=cfg["tile_y"].size[2])
+            tx, fused = s[load].split(fused, nparts=cfg["tile_x"].size[2])
+            s[load].bind(tz, te.thread_axis("threadIdx.z"))
+            s[load].bind(ty, te.thread_axis("threadIdx.y"))
+            s[load].bind(tx, te.thread_axis("threadIdx.x"))
+            s[load].vectorize(v)
 
     # unroll
     s[output].pragma(kernel_scope, "auto_unroll_max_step", cfg["auto_unroll_max_step"].val)
@@ -1253,6 +1262,7 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
 
 
     if isinstance(N, int):
+        print("FLOPs: ", 2 * N * OH * OW * OCC * OCB * ICKHKW)
         cfg.add_flop(2 * N * OH * OW * OCC * OCB * ICKHKW)
 
 
@@ -1624,31 +1634,34 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         placeholders = compute5d(shape)
         s = schedule5d(*placeholders)
     elif "tune" in args.test:
-        logfilename = args.test + "." + str(args.memory + "." if args.memory != None else "") + "autotvm.log"
+        logfilename = args.log
+        if logfilename == None:
+            logfilename = args.test + "." + str(args.memory + "." if args.memory != None else "") + "autotvm.log"
         print("Logfile: ", logfilename)
         options = {
             "log_filename": logfilename,
             "early_stopping": None,
             "measure_option": autotvm.measure_option(
-                builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=1000),
+                builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=15),
                 runner=autotvm.RPCRunner(
                     args.rpc_key,
                     host=args.rpc_tracker_host,
                     port=args.rpc_tracker_port,
                     number=3,
-                    timeout=1000,
+                    timeout=15,
                     #min_repeat_ms=150,
                     #cooldown_interval=150
                 ),
             )
         }
-        def tune_and_bench(func, template, *args, **kwargs):
-            task = autotvm.task.create(template, args=args, target=target, target_host=target_host)
+        def tune_and_bench(func, template, *pargs, **kwargs):
+            task = autotvm.task.create(template, args=pargs, target=target, target_host=target_host)
             print(task.config_space)
-            #tune_tasks([task], **options)
+            if args.tune:
+                tune_tasks([task], **options)
             with autotvm.apply_history_best(options["log_filename"]):
                 with tvm.target.Target(target):
-                    return func(*args)
+                    return func(*pargs)
         if args.test == "matmul_vector_accumulator_tune":
             shapeA, shapeB = (32, 64, 4), (128, 16, 4)
             s, placeholders = tune_and_bench(matmul_vector_acc_template, args.test, shapeA, shapeB)
