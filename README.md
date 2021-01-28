@@ -1,8 +1,69 @@
 # Qualcomm TVM Evaluation Repo
 
-Last version of TVM this was evaluated on and worked (10/1/2020): `c549239b9248371ca3eeabcd99e05e5e406fd43e`
+Last version of TVM this was evaluated on and worked (01/28/2021): `6f75cffb64f20e72a2fad425ce58d0fd32c0d4c8`
+For testing texture memory support, please use the tvm repository included as a subtree in this repository.
 
 Questions of issues using the scripts? Submit a ticket via the OctoML [helpdesk](https://octoml.atlassian.net/servicedesk/customer/portal/6).
+
+
+## Running texture.py tests:
+
+```
+usage: scripts/texture.py [-h] [-m MEMORY] [-s] [-l LOG] [-T] -t TEST
+                  [-r RPC_TRACKER_HOST] [-p RPC_TRACKER_PORT] [-k RPC_KEY]
+
+Set test arguments
+
+optional arguments:
+  -h, --help            show this help message and exit
+  -m MEMORY, --memory MEMORY
+                        Use global or texture
+  -s, --shared          Use shared memory
+  -l LOG, --log LOG     AutoTVM tuning record logfile
+  -T, --tune            Whether to tune or not
+  -t TEST, --test TEST  Selected test to run
+  -r RPC_TRACKER_HOST, --rpc_tracker_host RPC_TRACKER_HOST
+                        RPC tracker host IP address
+  -p RPC_TRACKER_PORT, --rpc_tracker_port RPC_TRACKER_PORT
+                        RPC tracker host port
+  -k RPC_KEY, --rpc_key RPC_KEY
+                        RPC key to use
+
+Example invocations,
+
+# ------------------------
+# Conv2d VGG16 layer [3x3]
+# ------------------------
+
+# Memory hierarchy: shared->local
+$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune2.autotvm.shared.log
+> 115.4 GFLOPS
+
+# Memory hierarchy: texture->shared->local
+$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune2.texture.shared.autotvm.best.log -m texture -s
+> 116.9 GFLOPS
+
+# Memory hierarchy: texture->local
+$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -m texture -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune2.texture.noshared.autotvm.log
+> 147.6 GFLOPS
+
+# ------------------------------
+# Conv2d MobilenetV1 layer [1x1]
+# ------------------------------
+
+# Memory hierarchy: shared->local
+$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune_1024.log -s
+> 100.2 GFLOPS
+
+# Memory hierarchy: texture->shared->local
+$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune_1024.log -s -m "texture"
+> 89.2 GFLOPS
+
+# Memory hierarchy: texture->local
+$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune.texture.noshared.log -m "texture"
+> 137.5 GFLOPS
+
+```
 
 
 ## Setting up the host development machine
@@ -92,3 +153,5 @@ optional arguments:
 
 ## Known issues ##
 Currently running with `-m deeplabv3 -t float16` will produce an internal invariant violation in TVM. This is known and under investigation.
+
+
