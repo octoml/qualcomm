@@ -38,15 +38,15 @@ Example invocations,
 # ------------------------
 
 # Memory hierarchy: shared->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune2.autotvm.shared.log
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -l logs/conv2d_NCHWc_KCRSk_tx_tune2.autotvm.shared.log
 > 115.4 GFLOPS
 
 # Memory hierarchy: texture->shared->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune2.texture.shared.autotvm.best.log -m texture -s
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -l logs/conv2d_NCHWc_KCRSk_tx_tune2.texture.shared.autotvm.best.log -m texture -s
 > 116.9 GFLOPS
 
 # Memory hierarchy: texture->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -m texture -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune2.texture.noshared.autotvm.log
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -m texture -l logs/conv2d_NCHWc_KCRSk_tx_tune2.texture.noshared.autotvm.log
 > 147.6 GFLOPS
 
 # ------------------------------
@@ -54,15 +54,15 @@ $ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=con
 # ------------------------------
 
 # Memory hierarchy: shared->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune_1024.log -s
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l logs/conv2d_NCHWc_KCRSk_tx_tune_1024.log -s
 > 100.2 GFLOPS
 
 # Memory hierarchy: texture->shared->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune_1024.log -s -m "texture"
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l logs/conv2d_NCHWc_KCRSk_tx_tune_1024.log -s -m "texture"
 > 89.2 GFLOPS
 
 # Memory hierarchy: texture->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune.texture.noshared.log -m "texture"
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l logs/conv2d_NCHWc_KCRSk_tx_tune.texture.noshared.log -m "texture"
 > 137.5 GFLOPS
 
 ```
