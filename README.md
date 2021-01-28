@@ -30,8 +30,9 @@ optional arguments:
   -k RPC_KEY, --rpc_key RPC_KEY
                         RPC key to use
 
+```
 Example invocations,
-
+```
 # ------------------------
 # Conv2d VGG16 layer [3x3]
 # ------------------------
