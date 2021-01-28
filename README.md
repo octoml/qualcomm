@@ -7,6 +7,7 @@ Questions of issues using the scripts? Submit a ticket via the OctoML [helpdesk]
 
 
 ## Running texture.py tests:
+`scripts/texture.py` is a set of compute and schedule definitions for various workloads employing texture memory cache stage when the `-m "texture"` argument is supplied. For each test, numerical comparisons are checked against numpy results. 
 
 ```
 usage: scripts/texture.py [-h] [-m MEMORY] [-s] [-l LOG] [-T] -t TEST
