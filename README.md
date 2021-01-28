@@ -7,7 +7,7 @@ Questions of issues using the scripts? Submit a ticket via the OctoML [helpdesk]
 
 
 ## Running texture.py tests:
-`scripts/texture.py` is a set of compute and schedule definitions for various workloads employing texture memory cache stage when the `-m "texture"` argument is supplied. For each test, numerical comparisons are checked against numpy results. 
+`scripts/texture.py` is a set of compute and schedule definitions for various workloads employing texture memory cache stage when the `-m "texture"` argument is supplied. For each test, numerical comparisons are checked against numpy results. Some of the tests can be tuned with the `--tune` flag. Log files with autotvm tuning records exist in the logs/ directory for many these tunable tests. See the below for a few invocation examples on how to run a tuned schedule with texture memory.
 
 ```
 usage: scripts/texture.py [-h] [-m MEMORY] [-s] [-l LOG] [-T] -t TEST
