@@ -14,11 +14,15 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+
 import os
+import numpy as np
+
 import tvm
 from tvm import relay
 from tvm import autotvm
 from tvm.contrib import utils, ndk
+from tvm.topi import testing
 
 
 class ModelImporter(object):
@@ -114,6 +118,39 @@ class ModelImporter(object):
             mod = downcast_fp16(mod["main"], mod)
         return (mod, params, input_shape, dtype, target)
 
+    def import_conv2d(self, target="llvm", dtype="float32"):
+        input_shape = (1, 128, 112, 112)
+        filter_shape = (128, 128, 3, 3)
+        A = relay.var("data", shape=input_shape, dtype="float32")
+        B = relay.var("weight", shape=filter_shape, dtype="float32")
+        C = relay.nn.conv2d(A, B)
+        func = relay.Function([A, B], C)
+        mod, params = relay.testing.init.create_workload(func)
+        def validator(inputs):
+            np_result = testing.conv2d_nchw_python(inputs[0], params["weight"].asnumpy(), 1, 0)
+            return [np_result,]
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
+
+
+    def import_conv2d_conv2d(self, target="llvm", dtype="float32"):
+        input_shape = (1, 128, 112, 112)
+        filter_shape = (128, 128, 3, 3)
+        A = relay.var("data", shape=input_shape, dtype="float32")
+        B1 = relay.var("weight1", shape=filter_shape, dtype="float32")
+        B2 = relay.var("weight2", shape=filter_shape, dtype="float32")
+        C = relay.nn.conv2d(A, B1)
+        D = relay.nn.conv2d(C, B2)
+        mod = relay.Function([A, B1, B2], D)
+
+        params = {
+            "weight1": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype("float32")),
+            "weight2": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype("float32")),
+        }
+        def validator(inputs):
+            conv2d = testing.conv2d_nchw_python(inputs[0], params["weight1"].asnumpy(), 1, 0)
+            np_result = testing.conv2d_nchw_python(conv2d, params["weight2"].asnumpy(), 1, 0)
+            return [np_result,]
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
 
 def get_args():
     import argparse
@@ -397,6 +434,7 @@ class Executor(object):
         target="llvm",
         target_host="llvm",
         dtype="float32",
+        validator=None
     ):
         if args.debug:
             from tvm.contrib.debugger import debug_runtime as graph_runtime
@@ -429,22 +467,30 @@ class Executor(object):
             print("Using local runtime")
             ctx = tvm.context(target, 0)
             m = graph_runtime.create(graph, lib, ctx)
-        if isinstance(input_shape, dict):
-            key = list(input_shape)[0]
-            input_shape = input_shape[key]
-        else:
-            key = "data"
-
-        import numpy as np
 
         m.set_input(**params)
-        m.set_input(key, np.random.normal(size=input_shape).astype(dtype))
+        inputs = []
+        if isinstance(input_shape, dict):
+            for key in input_shape:
+                inputs.append(np.random.normal(size=input_shape[key]).astype(dtype))
+                m.set_input(key, inputs[-1])
+        else:
+            inputs.append(np.random.normal(size=input_shape).astype(dtype))
+            m.set_input("data", inputs[-1])
+
         print("Evaluating...")
         time_f = m.module.time_evaluator("run", ctx, number=10)
         cost = time_f().mean
         print("%g secs/iteration\n" % cost)
+        if validator:
+            ref_outputs = validator(inputs)
+            for i, ref_output in enumerate(ref_outputs):
+                output = m.get_output(i)
+                np.testing.assert_allclose(output.asnumpy(), ref_output, rtol=1e-3, atol=1e-3)
+            print("Validation done")
 
-    def _schedule_jobs(self, mod, params, input_shape, dtype, target):
+
+    def _schedule_jobs(self, mod, params, input_shape, dtype, target, validator=None):
         def bench():
             self._benchmark(
                 mod,
@@ -453,6 +499,7 @@ class Executor(object):
                 target=target,
                 target_host=self.host_target,
                 dtype=dtype,
+                validator=validator
             )
 
         benchmark_index = len(self.benchmarks)
@@ -461,7 +508,7 @@ class Executor(object):
         def tune(apply_previous_tune=False, options=args.tuning_options):
             print("Extracting tasks")
             tasks = autotvm.task.extract_from_program(
-                mod["main"], target=target, target_host=self.host_target, params=params
+                mod, target=target, target_host=self.host_target, params=params
             )
             if apply_previous_tune == False:
                 print("Tuning kernels")
@@ -476,6 +523,7 @@ class Executor(object):
                         input_shape,
                         target=target,
                         target_host=self.host_target,
+                        validator=validator
                     )
 
             self.benchmarks.pop(benchmark_index)
