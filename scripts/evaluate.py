@@ -119,27 +119,37 @@ class ModelImporter(object):
         return (mod, params, input_shape, dtype, target)
 
     def import_conv2d(self, target="llvm", dtype="float32"):
-        input_shape = (1, 128, 112, 112)
-        filter_shape = (128, 128, 3, 3)
+        input_shape = (1, 32, 112, 112, 4)
+        filter_shape = (32, 128, 3, 3, 4)
         A = relay.var("data", shape=input_shape, dtype="float32")
         B = relay.var("weight", shape=filter_shape, dtype="float32")
-        C = relay.nn.conv2d(A, B)
+        C = relay.nn.conv2d(A, B, data_layout="NCHW4c", kernel_layout="OIHW4o")
         func = relay.Function([A, B], C)
         mod, params = relay.testing.init.create_workload(func)
         def validator(inputs):
-            np_result = testing.conv2d_nchw_python(inputs[0], params["weight"].asnumpy(), 1, 0)
+            vec_length = input_shape[-1]
+            # nchwc -> nchw
+            data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            # kcrsk -> kcrs
+            w_np = params["weight"].asnumpy()
+            kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
+            np_result = testing.conv2d_nchw_python(data, kernel, 1, 0)
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
             return [np_result,]
         return (mod, params, {"data": input_shape}, dtype, target, validator)
 
 
     def import_conv2d_conv2d(self, target="llvm", dtype="float32"):
-        input_shape = (1, 128, 112, 112)
-        filter_shape = (128, 128, 3, 3)
+        # input_shape = (1, 128, 112, 112)
+        # filter_shape = (128, 128, 3, 3)
+        input_shape = (1, 32, 112, 112, 4)
+        filter_shape = (32, 128, 3, 3, 4)
         A = relay.var("data", shape=input_shape, dtype="float32")
         B1 = relay.var("weight1", shape=filter_shape, dtype="float32")
         B2 = relay.var("weight2", shape=filter_shape, dtype="float32")
-        C = relay.nn.conv2d(A, B1)
-        D = relay.nn.conv2d(C, B2)
+        C = relay.nn.conv2d(A, B1, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        D = relay.nn.conv2d(C, B2, data_layout="NCHW4c", kernel_layout="OIHW4o")
         mod = relay.Function([A, B1, B2], D)
 
         params = {
@@ -147,8 +157,18 @@ class ModelImporter(object):
             "weight2": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype("float32")),
         }
         def validator(inputs):
-            conv2d = testing.conv2d_nchw_python(inputs[0], params["weight1"].asnumpy(), 1, 0)
-            np_result = testing.conv2d_nchw_python(conv2d, params["weight2"].asnumpy(), 1, 0)
+            vec_length = input_shape[-1]
+            # nchwc -> nchw
+            data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            # kcrsk -> kcrs
+            w1_np = params["weight1"].asnumpy()
+            kernel1 = w1_np.transpose((0, 4, 1, 2, 3)).reshape(w1_np.shape[0] * w1_np.shape[4], w1_np.shape[1], w1_np.shape[2], w1_np.shape[3])
+            w2_np = params["weight2"].asnumpy()
+            kernel2 = w2_np.transpose((0, 4, 1, 2, 3)).reshape(w2_np.shape[0] * w2_np.shape[4], w2_np.shape[1], w2_np.shape[2], w2_np.shape[3])
+            conv2d = testing.conv2d_nchw_python(data, kernel1, 1, 0)
+            np_result = testing.conv2d_nchw_python(conv2d, kernel2, 1, 0)
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
             return [np_result,]
         return (mod, params, {"data": input_shape}, dtype, target, validator)
 
@@ -205,7 +225,7 @@ def get_args():
         help="Compilation target",
     )
     parser.add_argument(
-        "--tune", type=bool, default=False, help="Whether or not to run autotuning"
+        "--tune", action="store_true", help="Whether or not to run autotuning"
     )
     parser.add_argument(
         "--debug",
