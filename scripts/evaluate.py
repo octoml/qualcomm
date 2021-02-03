@@ -243,13 +243,15 @@ def get_args():
         "log_filename": args.log,
         "early_stopping": None,
         "measure_option": autotvm.measure_option(
-            builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=1000),
+            builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=15),
             runner=autotvm.RPCRunner(
                 args.rpc_key,
                 host=args.rpc_tracker_host,
                 port=args.rpc_tracker_port,
-                number=5,
-                timeout=1000,
+                number=3,
+                timeout=15,
+                #min_repeat_ms=150,
+                #cooldown_interval=150
             ),
         ),
     }
