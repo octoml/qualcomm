@@ -1,12 +1,17 @@
 # Qualcomm TVM Evaluation Repo
 
-Last version of TVM this was evaluated on and worked (01/28/2021): `6f75cffb64f20e72a2fad425ce58d0fd32c0d4c8`
+***Disclaimer: This is in progress development code and does not reflect the productized final state that will be upstreamed. Some important features are missing and some refactoring is required. All code herein is subject to change.
+
+
+Last version of TVM this was evaluated on and worked (01/28/2021): `6f75cffb64f20e72a2fad425ce58d0fd32c0d4c8`.
+
 For testing texture memory support, please use the tvm repository included as a subtree in this repository.
 
 Questions of issues using the scripts? Submit a ticket via the OctoML [helpdesk](https://octoml.atlassian.net/servicedesk/customer/portal/6).
 
 
 ## Running texture.py tests:
+`scripts/texture.py` is a set of compute and schedule definitions for various workloads employing texture memory cache stage when the `-m "texture"` argument is supplied. For each test, numerical comparisons are checked against numpy results. Some of the tests can be tuned with the `--tune` flag. Log files with autotvm tuning records exist in the logs/ directory for many these tunable tests. See the below for a few invocation examples on how to run a tuned schedule with texture memory.
 
 ```
 usage: scripts/texture.py [-h] [-m MEMORY] [-s] [-l LOG] [-T] -t TEST
@@ -29,22 +34,23 @@ optional arguments:
   -k RPC_KEY, --rpc_key RPC_KEY
                         RPC key to use
 
+```
 Example invocations,
-
+```
 # ------------------------
 # Conv2d VGG16 layer [3x3]
 # ------------------------
 
 # Memory hierarchy: shared->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune2.autotvm.shared.log
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -l logs/conv2d_NCHWc_KCRSk_tx_tune2.autotvm.shared.log
 > 115.4 GFLOPS
 
 # Memory hierarchy: texture->shared->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune2.texture.shared.autotvm.best.log -m texture -s
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -l logs/conv2d_NCHWc_KCRSk_tx_tune2.texture.shared.autotvm.best.log -m texture -s
 > 116.9 GFLOPS
 
 # Memory hierarchy: texture->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -m texture -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune2.texture.noshared.autotvm.log
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune2 -m texture -l logs/conv2d_NCHWc_KCRSk_tx_tune2.texture.noshared.autotvm.log
 > 147.6 GFLOPS
 
 # ------------------------------
@@ -52,15 +58,15 @@ $ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=con
 # ------------------------------
 
 # Memory hierarchy: shared->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune_1024.log -s
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l logs/conv2d_NCHWc_KCRSk_tx_tune_1024.log -s
 > 100.2 GFLOPS
 
 # Memory hierarchy: texture->shared->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune_1024.log -s -m "texture"
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l logs/conv2d_NCHWc_KCRSk_tx_tune_1024.log -s -m "texture"
 > 89.2 GFLOPS
 
 # Memory hierarchy: texture->local
-$ python ../qualcomm/scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l ../qualcomm/logs/conv2d_NCHWc_KCRSk_tx_tune.texture.noshared.log -m "texture"
+$ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KCRSk_tx_tune -l logs/conv2d_NCHWc_KCRSk_tx_tune.texture.noshared.log -m "texture"
 > 137.5 GFLOPS
 
 ```
