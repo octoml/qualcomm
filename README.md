@@ -1,11 +1,12 @@
 # Qualcomm TVM Evaluation Repo
 
-***Disclaimer: This is in progress development code and does not reflect the productized final state that will be upstreamed. Some important features are missing and some refactoring is required. All code herein is subject to change.
-
+***Disclaimer: This is in progress development code and does not reflect the productized final state that will be upstreamed. Important features may be missing and some refactoring is required. All code herein is subject to change.
 
 Last version of TVM this was evaluated on and worked (01/28/2021): `6f75cffb64f20e72a2fad425ce58d0fd32c0d4c8`.
 
-For testing texture memory support, please use the tvm repository included as a subtree in this repository.
+For testing texture memory support, please use the tvm repository included as a subtree in this repository: [tvm](https://github.com/octoml/qualcomm/tree/master/tvm).
+
+
 
 Questions of issues using the scripts? Submit a ticket via the OctoML [helpdesk](https://octoml.atlassian.net/servicedesk/customer/portal/6).
 
