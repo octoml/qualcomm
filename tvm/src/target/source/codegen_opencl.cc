@@ -315,11 +315,21 @@ void CodeGenOpenCL::VisitStmt_(const StoreNode* op) {
       auto it = allocation_size_.find(op->buffer_var.get());
       if (it != allocation_size_.end() && it->second == 1)
       {
-          need_texture_ssa_ = true;
+        need_texture_ssa_ = true;
       }
     }
   }
   CodeGenC::VisitStmt_(op);
+  need_texture_ssa_ = true;
+}
+
+void CodeGenOpenCL::VisitExpr_(const CastNode* op, std::ostream& os) {
+  if (auto call = op->value.as<CallNode>()) {
+    if (call->op.same_as(builtin::text2d_load())) {
+      need_texture_ssa_ = false;
+    }
+  }
+  CodeGenC::VisitExpr_(op, os);
   need_texture_ssa_ = true;
 }
 
@@ -343,7 +353,15 @@ void CodeGenOpenCL::VisitExpr_(const CallNode* op, std::ostream& os) {
     this->PrintExpr(load->index, os);
     os << ')';
   } else if (op->op.same_as(builtin::text2d_store())) {
-    os << "write_imagef(";
+    auto* texture_type  = op->args[0].as<VarNode>()->type_annotation.as<TextureTypeNode>();
+    ICHECK(texture_type != nullptr) << "builtin::text2d_store() only supports storing to texture buffers";
+    DataType buffer_type = texture_type->element_type.as<PrimTypeNode>()->dtype;
+    if (buffer_type.is_float16()) {
+      os << "write_imageh(";
+    }
+    else if (buffer_type.is_float()) {
+      os << "write_imagef(";
+    }
     this->PrintExpr(op->args[0], os);
     os << ", ";
     os << "(int2)(";
@@ -355,7 +373,12 @@ void CodeGenOpenCL::VisitExpr_(const CallNode* op, std::ostream& os) {
     os << ")";
   } else if (op->op.same_as(builtin::text2d_load())) {
     std::stringstream ss;
-    ss << "read_imagef(";
+    if (op->dtype.is_float16()) {
+      ss << "read_imageh(";
+    }
+    else if (op->dtype.is_float()) {
+      ss << "read_imagef(";
+    }
     this->PrintExpr(op->args[0], ss);
     ss << ", ";
     ss << "CLK_NORMALIZED_COORDS_FALSE | CLK_ADDRESS_CLAMP | CLK_FILTER_NEAREST, ";
