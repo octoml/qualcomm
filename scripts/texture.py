@@ -40,7 +40,7 @@ def get_args():
     parser.add_argument('-l', '--log', type=str, default=None, help='AutoTVM tuning record logfile')
     parser.add_argument('-T', '--tune', action="store_true", help='Whether to tune or not')
     parser.add_argument('-t', '--test', type=str, required=True, help='Selected test to run')
-    # parser.add_argument('-N', type=int, help='Size of N for matrix B (KxN)')
+    parser.add_argument('-d', '--dtype', type=str, default="float32", choices=["float32","float16"], help='Datatype of input and output tensors')
     # parser.add_argument('-K', type=int, help='Size of reduction axis K')
     # parser.add_argument('-r', '--relay', action="store_true", help='Use relay for testing')
     parser.add_argument(
@@ -134,7 +134,7 @@ def tune_tasks(
         os.remove(tmp_log_file)
 
 def compute(shape):
-    X = te.placeholder(shape, name="X", dtype="float32")
+    X = te.placeholder(shape, name="X", dtype=args.dtype)
     Y = te.compute(shape, lambda i, j, k: X[i, j, k] + 1, name="Compute_Y")
     return X, Y
 
@@ -159,7 +159,7 @@ def schedule(X, Y):
     return s
 
 def compute5d(shape):
-    X = te.placeholder(shape, name="X", dtype="float32")
+    X = te.placeholder(shape, name="X", dtype=args.dtype)
     Y = te.compute(shape, lambda i, j, k, l, m: X[i, j, k, l, m] + 1, name="Compute_Y")
     return X, Y
 
@@ -184,13 +184,13 @@ def schedule5d(X, Y):
     return s
 
 def compute_matmul(shape):
-    A = te.placeholder(shape, name="A", dtype="float32")
-    B = te.placeholder(shape, name="B", dtype="float32")
+    A = te.placeholder(shape, name="A", dtype=args.dtype)
+    B = te.placeholder(shape, name="B", dtype=args.dtype)
     k = te.reduce_axis((0, shape[1]), name="k")
     C = te.compute(
         (shape[0]*shape[2], shape[0]*shape[2]),
         lambda i, j: te.sum(
-            A[i//shape[2], k, i%shape[2]].astype("float") * B[j//shape[2], k, j%shape[2]].astype("float"), axis=[k]
+            A[i//shape[2], k, i%shape[2]].astype(args.dtype) * B[j//shape[2], k, j%shape[2]].astype(args.dtype), axis=[k]
         ),
         name="Compute_MatMul",
     )
@@ -242,8 +242,8 @@ def schedule_matmul(A, B, C, local=False):
 
 
 def compute_matmul_inner(shape):
-    A = te.placeholder(shape, name="A", dtype="float32")
-    B = te.placeholder(shape, name="B", dtype="float32")
+    A = te.placeholder(shape, name="A", dtype=args.dtype)
+    B = te.placeholder(shape, name="B", dtype=args.dtype)
     k = te.reduce_axis((0, shape[1]*shape[2]), name="k")
     # (M, K) x (N, K)
     # (32, 256) x (32, 256)
@@ -251,7 +251,7 @@ def compute_matmul_inner(shape):
     C = te.compute(
         (shape[0], shape[0]),
         lambda i, j: te.sum(
-            A[i, k//shape[2], k%shape[2]].astype("float") * B[j, k//shape[2], k%shape[2]].astype("float"), axis=[k]
+            A[i, k//shape[2], k%shape[2]].astype(args.dtype) * B[j, k//shape[2], k%shape[2]].astype(args.dtype), axis=[k]
         ),
         name="Compute_MatMul",
     )
@@ -306,13 +306,13 @@ def compute_matmul_vector_accumulator(shapeA, shapeB):
     # A x B
     # (K/4, M, K%4) x (K, N/4, N%4) = (M, N)
     # (32, 64, 4) x (128, 16, 4) = (64, 64)
-    A = te.placeholder(shapeA, name="A", dtype="float32")
-    B = te.placeholder(shapeB, name="B", dtype="float32")
+    A = te.placeholder(shapeA, name="A", dtype=args.dtype)
+    B = te.placeholder(shapeB, name="B", dtype=args.dtype)
     k = te.reduce_axis((0, shapeB[0]), name="k")
     C = te.compute(
         (shapeA[1], shapeB[1]*shapeB[2]),
         lambda i, j: te.sum(
-            A[k//shapeA[-1], i, k%shapeA[-1]].astype("float") * B[k, j//shapeB[-1], j%shapeB[-1]].astype("float"), axis=[k]
+            A[k//shapeA[-1], i, k%shapeA[-1]].astype(args.dtype) * B[k, j//shapeB[-1], j%shapeB[-1]].astype(args.dtype), axis=[k]
         ),
         name="Compute_MatMul",
     )
@@ -420,8 +420,8 @@ def schedule_matmul_vector_accumulator_autotvm(A, B, C):
 
 def compute_conv2d_1x1_NCHWc_RSCKk(input_shape, filter_shape):
     # conv2d( [N, C, H, W, c] , [1, 1, C, K, k]
-    data = te.placeholder(input_shape, name="data", dtype="float32")
-    filt = te.placeholder(filter_shape, name="filter", dtype="float32")
+    data = te.placeholder(input_shape, name="data", dtype=args.dtype)
+    filt = te.placeholder(filter_shape, name="filter", dtype=args.dtype)
     c = te.reduce_axis((0, input_shape[1]), name="C")
     c4 = te.reduce_axis((0, input_shape[-1]), name="c4")
     kh = te.reduce_axis((0, filter_shape[0]), name="kh")
@@ -429,7 +429,7 @@ def compute_conv2d_1x1_NCHWc_RSCKk(input_shape, filter_shape):
     conv = te.compute(
         (input_shape[0], filter_shape[-2], input_shape[2], input_shape[3], filter_shape[-1]),
         lambda n, ko, i, j, ki: te.sum(
-            data[n, c, i, j, c4].astype("float") * filt[kh, kw, c*input_shape[-1] + c4, ko, ki].astype("float"), axis=[kh, kw, c, c4]
+            data[n, c, i, j, c4].astype(args.dtype) * filt[kh, kw, c*input_shape[-1] + c4, ko, ki].astype(args.dtype), axis=[kh, kw, c, c4]
         ),
         #name="Compute_conv2d_1x1_NCHWc_RSCKk",
         name = "conv2d_1x1"
@@ -483,8 +483,8 @@ def compute_conv2d_1x1_WCHNc_CRSKk(input_shape, filter_shape):
     # input_shape = [W, C, H, N, c] -> [W, C, H*N, c]
     # filter_shape = [C, R, S, K, k] -> [C, R*S*K, k]
     # output_shape: [WK, HN, k] -> [W, K, H, N, k]
-    data = te.placeholder(input_shape, name="data", dtype="float32")
-    filt = te.placeholder(filter_shape, name="filter", dtype="float32")
+    data = te.placeholder(input_shape, name="data", dtype=args.dtype)
+    filt = te.placeholder(filter_shape, name="filter", dtype=args.dtype)
 
     packed_data = te.compute(
         (input_shape[0], input_shape[1], input_shape[2] * input_shape[3], input_shape[4]),
@@ -512,9 +512,9 @@ def compute_conv2d_1x1_WCHNc_CRSKk(input_shape, filter_shape):
     conv = te.compute(
         (input_shape[0], filter_shape[3], input_shape[2], input_shape[3], filter_shape[4]),
         lambda w, ko, h, n, ki: te.sum(
-            packed_data[w, c, h * input_shape[3] + n, c4].astype("float")
+            packed_data[w, c, h * input_shape[3] + n, c4].astype(args.dtype)
             *
-            packed_filter[c*input_shape[-1] + c4, ((r * filter_shape[2]) + s) * filter_shape[3] + ko, ki].astype("float"), axis=[r, s, c, c4]
+            packed_filter[c*input_shape[-1] + c4, ((r * filter_shape[2]) + s) * filter_shape[3] + ko, ki].astype(args.dtype), axis=[r, s, c, c4]
         ),
         name = "conv2d_1x1"
     )
@@ -1267,7 +1267,7 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
 
 
 def compute_conv2d_NCHWc_KCRSk(
-    cfg, data, kernel, stride, padding, dilation, out_dtype="float32"
+    cfg, data, kernel, stride, padding, dilation, out_dtype=None
 ):
     """Convolution operator for 'conv2d_NCHWc_KCRSk'.
 
@@ -1299,6 +1299,8 @@ def compute_conv2d_NCHWc_KCRSk(
     Output : tvm.te.Tensor
         5-D with shape [batch, out_channel, out_height, out_width, out_channel_block]
     """
+    if out_dtype is None:
+        out_dtype = data.dtype
     ic_block_factor = 4
     oc_block_factor = 4
 
@@ -1559,18 +1561,18 @@ def conv2d_1x1_WCHNc_CRSKk_template(input_shape, filter_shape):
 @autotvm.template("conv2d_mali_NCHW_KCRS_tune")
 def conv2d_mali_NCHW_KCRS_template(input_shape, filter_shape):
     cfg = autotvm.get_config()
-    data = te.placeholder(input_shape, name="data", dtype="float32")
-    filt = te.placeholder(filter_shape, name="filter", dtype="float32")
-    data_vec, filter_vec, output, conv = compute_conv2d_mali_NCHW_KCRS(cfg, data, filt, [1,1], [0,0], [0,0], "float32", num_tile=3)
+    data = te.placeholder(input_shape, name="data", dtype=args.dtype)
+    filt = te.placeholder(filter_shape, name="filter", dtype=args.dtype)
+    data_vec, filter_vec, output, conv = compute_conv2d_mali_NCHW_KCRS(cfg, data, filt, [1,1], [0,0], [0,0], args.dtype, num_tile=3)
     s = te.create_schedule([x.op for x in [data_vec, filter_vec, output, conv]])
     s = schedule_conv2d_mali_NCHW_KCRS(cfg, s, output, conv, data_vec, filter_vec)
     return s, (data, filt, output)
 
 @autotvm.template("conv2d_cuda_NCHW_KCRS_tune")
 def conv2d_cuda_NCHW_KCRS_template(input_shape, filter_shape):
-    data = te.placeholder(input_shape, name="data", dtype="float32")
-    filt = te.placeholder(filter_shape, name="filter", dtype="float32")
-    conv = compute_conv2d_cuda_NCHW_KCRS(data, filt, [1,1], [0,0], [0,0], "float32")
+    data = te.placeholder(input_shape, name="data", dtype=args.dtype)
+    filt = te.placeholder(filter_shape, name="filter", dtype=args.dtype)
+    conv = compute_conv2d_cuda_NCHW_KCRS(data, filt, [1,1], [0,0], [0,0], args.dtype)
     cfg = autotvm.get_config()
     s = te.create_schedule([x.op for x in [conv]])
     schedule_conv2d_cuda_NCHW_KCRS(cfg, s, conv)
@@ -1579,17 +1581,17 @@ def conv2d_cuda_NCHW_KCRS_template(input_shape, filter_shape):
 @autotvm.template("conv2d_cuda_NCHWc_KCRSk_tune")
 def conv2d_cuda_NCHWc_KCRSk_template(input_shape, filter_shape):
     cfg = autotvm.get_config()
-    data = te.placeholder(input_shape, name="data", dtype="float32")
-    filt = te.placeholder(filter_shape, name="filter", dtype="float32")
-    output = compute_conv2d_NCHWc_KCRSk(cfg, data, filt, [1,1], [0,0], [0,0], "float32")
+    data = te.placeholder(input_shape, name="data", dtype=args.dtype)
+    filt = te.placeholder(filter_shape, name="filter", dtype=args.dtype)
+    output = compute_conv2d_NCHWc_KCRSk(cfg, data, filt, [1,1], [0,0], [0,0], args.dtype)
     s = te.create_schedule([x.op for x in [output]])
     s = schedule_conv2d_NCHWc_KCRSk(cfg, s, output)
     return s, (data, filt, output)
 
 def conv2d_NCHWc_KCRSk_tx_template_impl(input_shape, filter_shape):
-    data = te.placeholder(input_shape, name="data", dtype="float32")
-    filt = te.placeholder(filter_shape, name="filter", dtype="float32")
-    conv = compute_conv2d_NCHWc_KCRSk_tx(data, filt, [1,1], [0,0], [1,1], "float32")
+    data = te.placeholder(input_shape, name="data", dtype=args.dtype)
+    filt = te.placeholder(filter_shape, name="filter", dtype=args.dtype)
+    conv = compute_conv2d_NCHWc_KCRSk_tx(data, filt, [1,1], [0,0], [1,1], args.dtype)
     cfg = autotvm.get_config()
     s = te.create_schedule([x.op for x in [conv]])
     schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv)
@@ -1602,6 +1604,25 @@ def conv2d_NCHWc_KCRSk_tx_template(input_shape, filter_shape):
 @autotvm.template("conv2d_NCHWc_KCRSk_tx_tune2")
 def conv2d_NCHWc_KCRSk_tx_template2(input_shape, filter_shape):
     return conv2d_NCHWc_KCRSk_tx_template_impl(input_shape, filter_shape)
+
+
+def ref_convolution(data, kernel, stride, pad):
+    import mxnet as mx
+    groups = 1
+    kernel_size = (kernel.shape[2], kernel.shape[3])
+    num_filter = kernel.shape[0]
+    ref_res = mx.nd.Convolution(
+        data=mx.nd.array(data),
+        weight=mx.nd.array(kernel),
+        bias=None,
+        no_bias=True,
+        kernel=kernel_size,
+        stride=stride,
+        pad=pad,
+        num_filter=num_filter,
+        num_group=groups,
+    )
+    return ref_res.asnumpy()
 
 
 def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android"):
@@ -1761,10 +1782,11 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         args_np[0] = args_np[0].transpose((0, 1, 4, 2, 3)).reshape(args_np[0].shape[0], args_np[0].shape[1]*args_np[0].shape[-1], args_np[0].shape[2], args_np[0].shape[3])
         # kcrsk -> kcrs
         args_np[1] = args_np[1].transpose((0, 4, 1, 2, 3)).reshape(args_np[1].shape[0] * args_np[1].shape[4], args_np[1].shape[1], args_np[1].shape[2], args_np[1].shape[3])
-        np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
+        #np_result = testing.conv2d_nchw_python(args_np[0], args_np[1], 1, 0)
+        np_result = ref_convolution(args_np[0], args_np[1], [], [])
         # nkhw -> nkhwk
         np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
-    np.testing.assert_allclose(args_tvm[-1].asnumpy(), np_result, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(args_tvm[-1].asnumpy(), np_result, rtol=1e-2, atol=1e-2)
     print("validation done")
 
 
