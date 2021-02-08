@@ -1262,7 +1262,224 @@ def schedule_conv2d_NCHWc_KCRSk_tx(cfg, s, conv):
 
 
     if isinstance(N, int):
-        print("FLOPs: ", 2 * N * OH * OW * OCC * OCB * ICKHKW)
+        #print("FLOPs: ", 2 * N * OH * OW * OCC * OCB * ICKHKW)
+        cfg.add_flop(2 * N * OH * OW * OCC * OCB * ICKHKW)
+
+
+def compute_conv2d_NCHWc_KCRSk_tx_acc(Input, Filter, stride, padding, dilation, out_dtype=None):
+    """Convolution operator in NCHWc layout. """
+
+    if out_dtype is None:
+        out_dtype = Input.dtype
+    assert isinstance(stride, int) or len(stride) == 2
+    assert isinstance(dilation, int) or len(dilation) == 2
+    if isinstance(stride, int):
+        stride_h = stride_w = stride
+    else:
+        stride_h, stride_w = stride
+
+    if isinstance(dilation, int):
+        dilation_h = dilation_w = dilation
+    else:
+        dilation_h, dilation_w = dilation
+
+    batch, in_channel_chunk, in_height, in_width, in_channel_block = Input.shape
+    num_filter_chunk, channel, kernel_h, kernel_w, num_filter_block = Filter.shape
+    # compute the output shape
+    dilated_kernel_h = (kernel_h - 1) * dilation_h + 1
+    dilated_kernel_w = (kernel_w - 1) * dilation_w + 1
+    pad_top, pad_left, pad_down, pad_right = nn.get_pad_tuple(
+        padding, (dilated_kernel_h, dilated_kernel_w)
+    )
+
+    out_height = simplify((in_height - dilated_kernel_h + pad_top + pad_down) // stride_h + 1)
+    out_width = simplify((in_width - dilated_kernel_w + pad_left + pad_right) // stride_w + 1)
+    # compute graph
+    pad_before = [0, 0, pad_top, pad_left, 0]
+    pad_after = [0, 0, pad_down, pad_right, 0]
+    temp = nn.pad(Input, pad_before, pad_after, name="pad_temp")
+
+    rcc = te.reduce_axis((0, in_channel_chunk), name="rc")
+    rcb = te.reduce_axis((0, in_channel_block), name="rc")
+    ry = te.reduce_axis((0, kernel_h), name="ry")
+    rx = te.reduce_axis((0, kernel_w), name="rx")
+
+    if args.memory != None:
+        # NCHWc x KCRSk
+        # texture: NCH|W|c
+        # texture: K|CRS|k
+        # c = crs//RS
+        # rs = crs % RS
+        # r = rs // W == (crs // S) % R
+        # s = rs % W == crs % S
+        Filter_tx = te.compute(
+            (num_filter_chunk, channel * kernel_h * kernel_w, num_filter_block),
+            lambda ffc, crs, ffb: Filter[ffc, crs // (kernel_h * kernel_w), (crs // kernel_w) % kernel_h, crs % kernel_w, ffb],
+            name = "packed_filter"
+        )
+        conv = te.compute(
+            (batch, num_filter_chunk, out_height, out_width, num_filter_block),
+            lambda nn, ffc, yy, xx, ffb: te.sum(
+                (temp[nn, rcc, yy * stride_h + ry * dilation_h, xx * stride_w + rx * dilation_w, rcb]
+                * Filter_tx[ffc, ((rcc * in_channel_block + rcb)*kernel_h + ry)*kernel_w + rx, ffb]).astype(out_dtype),
+                axis=[rcc, rcb, ry, rx],
+            ),
+            tag="conv2d_nchwc_kcrsk_texture",
+        )
+        output = te.compute(conv.shape, lambda n,fc,y,x,fb: conv[n,fc,y,x,fb].astype(args.dtype))
+    else:
+        conv = te.compute(
+            (batch, num_filter_chunk, out_height, out_width, num_filter_block),
+            lambda nn, ffc, yy, xx, ffb: te.sum(
+                (temp[nn, rcc, yy * stride_h + ry * dilation_h, xx * stride_w + rx * dilation_w, rcb]
+                * Filter[ffc, rcc * in_channel_block + rcb, ry, rx, ffb]).astype(out_dtype),
+                axis=[rcc, rcb, ry, rx],
+            ),
+            tag="conv2d_nchwc_kcrsk",
+        )
+        output = te.compute(conv.shape, lambda n,fc,y,x,fb: conv[n,fc,y,x,fb].astype(args.dtype))
+
+    return output
+
+
+
+def schedule_conv2d_NCHWc_KCRSk_tx_acc(cfg, s, output):
+    """schedule optimized for batch size = 1"""
+
+    conv = output.op.input_tensors[0]
+    #s[output].compute_inline()
+    #conv = output
+
+    ##### space definition begin #####
+    n, fc, y, x, fb = s[conv].op.axis
+    rcc, rcb, ry, rx = s[conv].op.reduce_axis
+    cfg.define_split("tile_fc", fc, num_outputs=4)
+    cfg.define_split("tile_y", y, num_outputs=4)
+    cfg.define_split("tile_x", x, num_outputs=4)
+    cfg.define_split("tile_rcc", rcc, num_outputs=2)
+    cfg.define_split("tile_ry", ry, num_outputs=2)
+    cfg.define_split("tile_rx", rx, num_outputs=2)
+    cfg.define_knob("auto_unroll_max_step", [0, 512, 1500])
+
+    target = tvm.target.Target.current()
+    if target.kind.name in ["nvptx", "rocm"]:
+        cfg.define_knob("unroll_explicit", [1])
+    else:
+        cfg.define_knob("unroll_explicit", [0, 1])
+    ##### space definition end #####
+
+    if args.memory != None:
+        pad_data, flattened_kernel = s[conv].op.input_tensors
+        kernel = s[flattened_kernel].op.input_tensors[0]
+        s[flattened_kernel].compute_inline()
+    else:
+        pad_data, kernel = s[conv].op.input_tensors
+        flattened_kernel = kernel
+
+    s[pad_data].compute_inline()
+    if isinstance(kernel.op, tvm.te.ComputeOp) and "dilate" in kernel.op.tag:
+        s[kernel].compute_inline()
+    kernel = flattened_kernel
+
+    if conv.op in s.outputs:
+        output = conv
+        OL = s.cache_write(conv, "local")
+    else:
+        output = s.outputs[0].output(0)
+        s[conv].set_scope("local")
+        OL = conv
+
+    # create cache stage
+    if args.memory != None:
+        AT = s.cache_read(pad_data, args.memory, [OL])
+        WT = s.cache_read(kernel, args.memory, [OL])
+        def copy_to_texture(stage):
+            axes = s[stage].op.axis
+            fused = s[stage].fuse(*axes[:-1])
+            block, thread = s[stage].split(fused, factor=32)
+            s[stage].vectorize(axes[-1])
+            s[stage].bind(block, te.thread_axis("blockIdx.x"))
+            s[stage].bind(thread, te.thread_axis("threadIdx.x"))
+        copy_to_texture(AT)
+        copy_to_texture(WT)
+
+        if args.shared:
+            AA = s.cache_read(AT, "shared", [OL])
+            WW = s.cache_read(WT, "shared", [OL])
+    else:
+        AA = s.cache_read(pad_data, "shared", [OL])
+        WW = s.cache_read(kernel, "shared", [OL])
+
+    # tile and bind spatial axes
+    n, fc, y, x, fb = s[output].op.axis
+
+    kernel_scope, n = s[output].split(n, nparts=1)
+
+    bf, vf, tf, fi = cfg["tile_fc"].apply(s, output, fc)
+    by, vy, ty, yi = cfg["tile_y"].apply(s, output, y)
+    bx, vx, tx, xi = cfg["tile_x"].apply(s, output, x)
+
+    bf = s[output].fuse(n, bf)
+    s[output].bind(bf, te.thread_axis("blockIdx.z"))
+    s[output].bind(by, te.thread_axis("blockIdx.y"))
+    s[output].bind(bx, te.thread_axis("blockIdx.x"))
+    s[output].bind(vf, te.thread_axis("vthread"))
+    s[output].bind(vy, te.thread_axis("vthread"))
+    s[output].bind(vx, te.thread_axis("vthread"))
+    s[output].bind(tf, te.thread_axis("threadIdx.z"))
+    s[output].bind(ty, te.thread_axis("threadIdx.y"))
+    s[output].bind(tx, te.thread_axis("threadIdx.x"))
+    s[output].reorder(bf, by, bx, vf, vy, vx, tf, ty, tx, fi, yi, xi, fb)
+    s[output].vectorize(fb)
+
+    s[OL].compute_at(s[output], tx)
+
+    # tile reduction axes
+    n, fc, y, x, fb = s[OL].op.axis
+
+    rcc, rcb, ry, rx = s[OL].op.reduce_axis
+    rco, rci = cfg["tile_rcc"].apply(s, OL, rcc)
+    ryo, ryi = cfg["tile_ry"].apply(s, OL, ry)
+    rxo, rxi = cfg["tile_rx"].apply(s, OL, rx)
+
+    # TODO(csullivan): check position of rcb
+    s[OL].reorder(rco, ryo, rxo, rci, ryi, rxi, rcb, n, fc, y, x, fb)
+    s[OL].vectorize(fb)
+    s[OL].unroll(rcb)
+
+    if args.memory == None or args.shared:
+        s[AA].compute_at(s[OL], rxo)
+        s[WW].compute_at(s[OL], rxo)
+        # cooperative fetching
+        for load in [AA, WW]:
+            if args.memory != None and load == WW:
+                n, fyx, v = s[load].op.axis
+                fused = s[load].fuse(n, fyx)
+            else:
+                n, f, y, x, v = s[load].op.axis
+                fused = s[load].fuse(n, f, y, x)
+            tz, fused = s[load].split(fused, nparts=cfg["tile_fc"].size[2])
+            ty, fused = s[load].split(fused, nparts=cfg["tile_y"].size[2])
+            tx, fused = s[load].split(fused, nparts=cfg["tile_x"].size[2])
+            s[load].bind(tz, te.thread_axis("threadIdx.z"))
+            s[load].bind(ty, te.thread_axis("threadIdx.y"))
+            s[load].bind(tx, te.thread_axis("threadIdx.x"))
+            s[load].vectorize(v)
+
+    # unroll
+    s[output].pragma(kernel_scope, "auto_unroll_max_step", cfg["auto_unroll_max_step"].val)
+    s[output].pragma(kernel_scope, "unroll_explicit", cfg["unroll_explicit"].val)
+
+    N, OCC, OH, OW, OCB = get_const_tuple(output.shape)
+    if args.memory != None:
+        _, ICKHKW, _ = get_const_tuple(kernel.shape)
+    else:
+        _, IC, KH, KW, _ = get_const_tuple(kernel.shape)
+        ICKHKW = IC*KH*KW
+
+
+    if isinstance(N, int):
+        #print("FLOPs: ", 2 * N * OH * OW * OCC * OCB * ICKHKW)
         cfg.add_flop(2 * N * OH * OW * OCC * OCB * ICKHKW)
 
 
@@ -1377,8 +1594,8 @@ def compute_conv2d_NCHWc_KCRSk(
                 oh * stride_h + kh * dilation_h,
                 ow * stride_w + kw * dilation_w,
                 icb,
-            ].astype(out_dtype)
-            * packed_kernel[occ, icc * ic_block + icb, kh, kw, ocb].astype(out_dtype),
+            ]
+            * packed_kernel[occ, icc * ic_block + icb, kh, kw, ocb],
             axis=[icc, kh, kw, icb],
         ),
     )
@@ -1588,6 +1805,15 @@ def conv2d_cuda_NCHWc_KCRSk_template(input_shape, filter_shape):
     s = schedule_conv2d_NCHWc_KCRSk(cfg, s, output)
     return s, (data, filt, output)
 
+def conv2d_NCHWc_KCRSk_tx_template_fp32_acc(input_shape, filter_shape):
+    data = te.placeholder(input_shape, name="data", dtype=args.dtype)
+    filt = te.placeholder(filter_shape, name="filter", dtype=args.dtype)
+    output = compute_conv2d_NCHWc_KCRSk_tx_acc(data, filt, [1,1], [0,0], [1,1], "float32")
+    cfg = autotvm.get_config()
+    s = te.create_schedule([x.op for x in [output]])
+    schedule_conv2d_NCHWc_KCRSk_tx_acc(cfg, s, output)
+    return s, (data, filt, output)
+
 def conv2d_NCHWc_KCRSk_tx_template_impl(input_shape, filter_shape):
     data = te.placeholder(input_shape, name="data", dtype=args.dtype)
     filt = te.placeholder(filter_shape, name="filter", dtype=args.dtype)
@@ -1605,6 +1831,14 @@ def conv2d_NCHWc_KCRSk_tx_template(input_shape, filter_shape):
 def conv2d_NCHWc_KCRSk_tx_template2(input_shape, filter_shape):
     return conv2d_NCHWc_KCRSk_tx_template_impl(input_shape, filter_shape)
 
+@autotvm.template("conv2d_NCHWc_KCRSk_tx_fp32acc_tune")
+def conv2d_NCHWc_KCRSk_tx_fp32acc_template(input_shape, filter_shape):
+    return conv2d_NCHWc_KCRSk_tx_template_fp32_acc(input_shape, filter_shape)
+
+@autotvm.template("conv2d_NCHWc_KCRSk_tx_fp32acc_tune2")
+def conv2d_NCHWc_KCRSk_tx_fp32acc_template2(input_shape, filter_shape):
+    return conv2d_NCHWc_KCRSk_tx_template_fp32_acc(input_shape, filter_shape)
+print(args.test)
 
 def ref_convolution(data, kernel, stride, pad):
     import mxnet as mx
@@ -1709,12 +1943,18 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
             # NCHWc, KCRSk
             input_shape, filter_shape = (1, 32, 56, 56, 4), (32, 128, 1, 1, 4)
             s, placeholders = tune_and_bench(conv2d_NCHWc_KCRSk_tx_template, args.test, input_shape, filter_shape)
+        elif args.test == "conv2d_NCHWc_KCRSk_tx_fp32acc_tune":
+            # NCHWc, KCRSk
+            input_shape, filter_shape = (1, 32, 56, 56, 4), (32, 128, 1, 1, 4)
+            s, placeholders = tune_and_bench(conv2d_NCHWc_KCRSk_tx_fp32acc_template, args.test, input_shape, filter_shape)
         elif args.test == "conv2d_NCHWc_KCRSk_tx_tune2":
             # NCHWc, KCRSk
-            #input_shape, filter_shape = (1, 32, 56, 56, 4), (32, 128, 3, 3, 4)
-            #input_shape, filter_shape = (1, 32, 56, 56, 4), (64, 128, 3, 3, 4)
             input_shape, filter_shape = (1, 32, 112, 112, 4), (32, 128, 3, 3, 4)
             s, placeholders = tune_and_bench(conv2d_NCHWc_KCRSk_tx_template2, args.test, input_shape, filter_shape)
+        elif args.test == "conv2d_NCHWc_KCRSk_tx_fp32acc_tune2":
+            # NCHWc, KCRSk
+            input_shape, filter_shape = (1, 32, 112, 112, 4), (32, 128, 3, 3, 4)
+            s, placeholders = tune_and_bench(conv2d_NCHWc_KCRSk_tx_fp32acc_template2, args.test, input_shape, filter_shape)
         else:
             raise RuntimeError("No test found with name: " + args.test)
     else:
