@@ -229,9 +229,13 @@ def get_args():
     )
     parser.add_argument(
         "--debug",
-        type=bool,
-        default=False,
+        action="store_true",
         help="Use graph runtime debugger to output per layer perf. data and other statistics",
+    )
+    parser.add_argument(
+        "--vm",
+        action="store_true",
+        help="Use the virtual machine for runtime execution",
     )
 
     args = parser.parse_args()
@@ -458,18 +462,23 @@ class Executor(object):
         dtype="float32",
         validator=None
     ):
+        if self.use_tracker and self.remote == None:
+            self._connect_tracker()
+
         if args.debug:
             from tvm.contrib.debugger import debug_runtime as graph_runtime
         else:
             from tvm.contrib import graph_runtime
 
-        if self.use_tracker and self.remote == None:
-            self._connect_tracker()
-
         with relay.build_config(opt_level=3):
-            graph, lib, params = relay.build(
-                tvm_mod, target_host=target_host, target=target, params=params
-            )
+            if args.vm:
+                exe = relay.vm.compile(
+                    tvm_mod, target_host=target_host, target=target, params=params
+                )
+            else:
+                graph, lib, params = relay.build(
+                    tvm_mod, target_host=target_host, target=target, params=params
+                )
 
         if self.remote:
             print("Using Android OpenCL runtime over RPC")
@@ -480,17 +489,28 @@ class Executor(object):
                 ctx = self.remote.cl(0)
             else:
                 ctx = self.remote.cpu(0)
+            if args.vm:
+                code, lib = exe.save()
             lib.export_library(dso_binary_path, ndk.create_shared)
             self.remote.upload(dso_binary_path)
             print("Uploading binary...")
-            rlib = self.remote.load_module(dso_binary)
-            m = graph_runtime.create(graph, rlib, ctx)
+            lib = self.remote.load_module(dso_binary)
         else:
             print("Using local runtime")
             ctx = tvm.context(target, 0)
-            m = graph_runtime.create(graph, lib, ctx)
 
-        m.set_input(**params)
+        if args.vm:
+            exe = tvm.runtime.vm.Executable.load_exec(code, lib)
+            from tvm.runtime import vm
+            m = vm.VirtualMachine(exe, ctx)
+            #from tvm.runtime import profiler_vm as vm
+            # if not profiler_vm.enabled():
+            #     raise ValueError("VMProfiler was not initialized")
+            #m = vm.VirtualMachineProfiler(exe, ctx)
+        else:
+            m = graph_runtime.create(graph, lib, ctx)
+            m.set_input(**params)
+
         inputs = []
         if isinstance(input_shape, dict):
             for key in input_shape:
