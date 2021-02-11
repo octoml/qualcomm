@@ -38,6 +38,7 @@ namespace runtime {
  *       correspondence to the thread rank.
  */
 enum class StorageRank {
+  // TODO(csullivan): set texture to 7 and create IsTextureScope helper
   /*! \brief global texture memory */
   kTexture = -1,
   /*! \brief global memory */
