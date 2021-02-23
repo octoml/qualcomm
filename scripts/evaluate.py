@@ -237,8 +237,7 @@ def get_args():
     )
     parser.add_argument(
         "--debug",
-        type=bool,
-        default=False,
+        action="store_true",
         help="Use graph runtime debugger to output per layer perf. data and other statistics",
     )
 
@@ -511,12 +510,14 @@ class Executor(object):
         print("Evaluating...")
         time_f = m.module.time_evaluator("run", ctx, number=10)
         cost = time_f().mean
+        m.run()
         print("%g secs/iteration\n" % cost)
         if validator:
             ref_outputs = validator(inputs)
             for i, ref_output in enumerate(ref_outputs):
-                output = m.get_output(i)
-                np.testing.assert_allclose(output.asnumpy(), ref_output, rtol=1e-3, atol=1e-3)
+                tvm_output = m.get_output(i)
+                output = tvm_output.asnumpy()
+                np.testing.assert_allclose(output, ref_output, rtol=1e-3, atol=1e-3)
             print("Validation done")
 
 
