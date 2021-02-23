@@ -52,8 +52,20 @@ class ModelImporter(object):
     def import_mobilenetv1(self, target="llvm", dtype="float32"):
         model, input_shape = gluon_model("mobilenet1.0", batch_size=1)
         mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        # layout transformation
+        layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+        with layout_config:
+            seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+            with tvm.transform.PassContext(opt_level=3):
+                mod = seq(mod)
+        # downcast to float16
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
         return (mod, params, input_shape, dtype, target)
 
     def import_vgg16(self, target="llvm", dtype="float32"):
