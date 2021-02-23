@@ -101,22 +101,29 @@ class ModelImporter(object):
         return (mod, params, input_shape, dtype, target)
 
     def import_inceptionv3(self, target="llvm", dtype="float32"):
-        import tvm.relay.testing.tf as tf_importer
-
-        graph_def = tf_importer.get_workload(
-            os.path.abspath(
-                os.path.dirname(os.path.realpath(__file__))
-                + "/../models/inception_v3_2016_08_28_frozen_opt.pb"
+        import onnx
+        model_file = os.path.abspath(
+            os.path.dirname(os.path.realpath(__file__)) + "/../models/inceptionv3.onnx")
+        if os.path.exists(model_file) == False:
+            import keras2onnx
+            import tensorflow as tf
+            model = tf.keras.applications.InceptionV3(
+                include_top=True,
+                weights="imagenet",
+                input_tensor=None,
+                input_shape=None,
+                pooling=None,
+                classes=1000,
+                classifier_activation="softmax",
             )
-        )
-        graph_def = tf_importer.ProcessGraphDefParam(graph_def)
-        input_shape = {"input": (1, 299, 299, 3)}
-        mod, params = relay.frontend.from_tensorflow(
-            graph_def, shape=input_shape, layout="NCHW"
-        )
-        if dtype == "float16":
-            mod = downcast_fp16(mod["main"], mod)
-        return (mod, params, input_shape, dtype, target)
+            onnx_model = keras2onnx.convert_keras(model, model.name, target_opset=11)
+            onnx.save(onnx_model, model_file)
+        model = onnx.load(model_file)
+        shape_dict = {'input_1': [1, 299, 299, 3]}
+        mod, params = relay.frontend.from_onnx(model, shape_dict, freeze_params=True)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+        return (mod, params, shape_dict, dtype, target)
+
 
     def import_conv2d(self, target="llvm", dtype="float32"):
         input_shape = (1, 32, 112, 112, 4)
