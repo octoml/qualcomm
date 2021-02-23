@@ -128,9 +128,9 @@ class ModelImporter(object):
     def import_conv2d(self, target="llvm", dtype="float32"):
         input_shape = (1, 32, 112, 112, 4)
         filter_shape = (32, 128, 3, 3, 4)
-        A = relay.var("data", shape=input_shape, dtype="float32")
-        B = relay.var("weight", shape=filter_shape, dtype="float32")
-        C = relay.nn.conv2d(A, B, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        C = relay.nn.conv2d(A, B, data_layout="NCHW4c", kernel_layout="OIHW4o", out_dtype=dtype)
         func = relay.Function([A, B], C)
         mod, params = relay.testing.init.create_workload(func)
         def validator(inputs):
@@ -144,7 +144,8 @@ class ModelImporter(object):
             # nkhw -> nkhwk
             np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
             return [np_result,]
-        return (mod, params, {"data": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target, validator)
+        return (mod, params, {"data": input_shape}, dtype, target)
 
 
     def import_conv2d_conv2d(self, target="llvm", dtype="float32"):
@@ -200,7 +201,7 @@ def get_args():
         "-t",
         "--type",
         type=str,
-        default="float32",
+        default="float16",
         choices=["float32", "float16"],
         help="Specify whether the model should be run with single or half precision floating point values",
     )
