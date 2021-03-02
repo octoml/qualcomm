@@ -232,6 +232,7 @@ class OpenCLWorkspace : public DeviceAPI {
   void SetDevice(TVMContext ctx) final;
   void GetAttr(TVMContext ctx, DeviceAttrKind kind, TVMRetValue* rv) final;
   void* AllocDataSpace(TVMContext ctx, size_t size, size_t alignment, DLDataType type_hint) final;
+  void* AllocDataSpace(TVMContext ctx, int ndim, const int64_t* shape, DLDataType dtype, Optional<String> mem_scope) final;
   void FreeDataSpace(TVMContext ctx, void* ptr) final;
   void StreamSync(TVMContext ctx, TVMStreamHandle stream) final;
   void* AllocWorkspace(TVMContext ctx, size_t size, DLDataType type_hint) final;
