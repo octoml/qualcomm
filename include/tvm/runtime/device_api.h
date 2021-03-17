@@ -181,21 +181,36 @@ class TVM_DLL DeviceAPI {
    * \param ptr The pointer to be freed.
    */
   virtual void FreeWorkspace(TVMContext ctx, void* ptr);
-
   /*!
-   * TODO(csullivan): Needs docs
+   * \brief Allocate a two dimensional texture data space on device
+   * \param ctx The device context to perform operation.
+   * \param width The width of the 2d texture in elements
+   * \param height The height of the 2d texture in elements
+   * \param type_hint The type of elements.
    */
   virtual void* AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint = {});
   /*!
-   * TODO(csullivan): Needs docs
-   */
-  virtual void FreeTexture(TVMContext ctx, void* ptr);
-  /*!
-   * TODO(csullivan): Needs docs
+   * \brief Allocate a two dimensional temporal texture workspace on device
+   *
+   * \note Two dimensional texture workspaces will be grown and reused
+   * according to the following strategy:
+   *  - Choose the workspace which minimizes the amount of memory required to
+   *    grow the workspace to fit the request.
+   *  - If a set of workspaces exist that fit the current request without
+   *    expansion, choose the workspace of that set which most closely
+   *    matches the request size, minimizing wasted space.
+   *
+   * \param ctx The device context to perform operation.
+   * \param width The width of the 2d texture in elements
+   * \param height The height of the 2d texture in elements
+   * \param type_hint The type of elements.
    */
   virtual void* AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint = {});
   /*!
-   * TODO(csullivan): Needs docs
+   * \brief Free the two dimensional temporal texture workspace.
+   *
+   * \param ctx The context of allocation.
+   * \param ptr The pointer to be freed.
    */
   virtual void FreeTextureWorkspace(TVMContext ctx, void* ptr);
   /*!

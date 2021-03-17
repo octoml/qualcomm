@@ -100,18 +100,27 @@ TVM_DLL void* TVMBackendAllocWorkspace(int device_type, int device_id, uint64_t 
 TVM_DLL int TVMBackendFreeWorkspace(int device_type, int device_id, void* ptr);
 
 /*!
- * \brief Backend function to allocate texture memory
+ * \brief Backend function to allocate temporal texture 2d workspace
  *
- * \param
+ * \param device_type The device type which the space will be allocated.
+ * \param device_id The device id which the space will be allocated.
+ * \param width The width of the 2d texture in elements
+ * \param height The height of the 2d texture in elements
+ * \param dtype_code_hint The type code of the elements
+ * \param dtype_bits_hint The type bits of the elements
  * \return nullptr when error is thrown, a valid ptr if success
+ *
+ * \sa TVMBackendAllocTexture
  */
 TVM_DLL void* TVMBackendAllocTexture(int device_type, int device_id, uint64_t width,
                                      uint64_t height, int dtype_code_hint, int dtype_bits_hint);
 
 /*!
- * \brief Backend function to free texture memory
+ * \brief Backend function to free temporal texture 2d workspace.
  *
- * \param
+ * \param device_type The device type of the allocated space
+ * \param device_id The device id of the allocated space
+ * \param ptr The allocated texture 2d workspace pointer
  * \return 0 when no error is thrown, -1 when failure happens
  *
  * \sa TVMBackendAllocTexture
