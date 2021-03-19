@@ -235,6 +235,8 @@ class OpenCLWorkspace : public DeviceAPI {
   void StreamSync(TVMContext ctx, TVMStreamHandle stream) final;
   void* AllocWorkspace(TVMContext ctx, size_t size, DLDataType type_hint) final;
   void FreeWorkspace(TVMContext ctx, void* data) final;
+  void* AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) final;
+  void FreeTexture(TVMContext ctx, void* data) final;
 
   /*!
    * \brief Get the thread local ThreadEntry
