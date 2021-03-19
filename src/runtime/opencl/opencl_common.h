@@ -238,7 +238,6 @@ class OpenCLWorkspace : public DeviceAPI {
   void* AllocWorkspace(TVMContext ctx, size_t size, DLDataType type_hint) final;
   void FreeWorkspace(TVMContext ctx, void* data) final;
   void* AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) final;
-  void FreeTexture(TVMContext ctx, void* data) final;
   void* AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) final;
   void FreeTextureWorkspace(TVMContext ctx, void* data) final;
 
