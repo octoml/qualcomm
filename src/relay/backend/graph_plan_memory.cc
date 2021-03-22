@@ -285,7 +285,9 @@ class StorageAllocator : public StorageAllocaBaseVisitor {
     ICHECK(it != prototype_.end());
     std::vector<StorageToken*> tokens;
     for (StorageToken* tok : it->second) {
-      if (can_realloc) {
+      // TODO(csullivan): Remove the check on global which
+      // prevents memory reuse for texture memory
+      if (can_realloc && tok->storage_scope == "global") {
         tokens.push_back(allocator_.Request(tok));
       } else {
         // Allocate a new token,
