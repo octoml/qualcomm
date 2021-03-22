@@ -2,7 +2,7 @@
 
 ***Disclaimer: This is in progress development code and does not reflect the productized final state that will be upstreamed. Important features may be missing and some refactoring is required. All code herein is subject to change.
 
-Last version of TVM this was evaluated on and worked (01/28/2021): `6f75cffb64f20e72a2fad425ce58d0fd32c0d4c8`.
+Last version of TVM this was evaluated on and worked (01/28/2021): `4abbe4902e451cc5a963b8b60a70e548d48ace62`.
 
 For testing texture memory support, please use the tvm repository included as a subtree in this repository: [tvm](https://github.com/octoml/qualcomm/tree/master/tvm).
 
@@ -10,6 +10,22 @@ For testing texture memory support, please use the tvm repository included as a 
 
 Questions of issues using the scripts? Submit a ticket via the OctoML [helpdesk](https://octoml.atlassian.net/servicedesk/customer/portal/6).
 
+## Testing model performance with texture memory:
+```
+# float16 compute, float16 accumulate
+python ./scripts/evaluate.py -m mobilenetv1 -t float16 -k android --target="opencl --device=adreno" -l ./logs/mobilenetv1.texture.float16.acc16.autotvm.log
+
+# float16 compute, float32 accumulate
+python ./scripts/evaluate.py -m mobilenetv1 -t float16 -k android --target="opencl --device=adreno" -l ./logs/mobilenetv1.texture.float16.acc32.autotvm.log
+
+# float16 compute, float16 accumulate
+python ./scripts/evaluate.py -m resnet50 -t float16 -k android --target="opencl --device=adreno" -l ./logs/resnet50.texture.float16.acc16.autotvm.log
+
+# float16 compute, float32 accumulate
+python ./scripts/evaluate.py -m resnet50 -t float16 -k android --target="opencl --device=adreno" -l ./logs/resnet50.texture.float16.acc32.autotvm.log
+
+```
+Refer to the below instructions for running the `scripts/evaluate.py` script for more information
 
 ## Running texture.py tests:
 `scripts/texture.py` is a set of compute and schedule definitions for various workloads employing texture memory cache stage when the `-m "texture"` argument is supplied. For each test, numerical comparisons are checked against numpy results. Some of the tests can be tuned with the `--tune` flag. Log files with autotvm tuning records exist in the logs/ directory for many these tunable tests. See the below for a few invocation examples on how to run a tuned schedule with texture memory.
