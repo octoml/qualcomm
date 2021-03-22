@@ -723,9 +723,10 @@ class Executor(object):
             else:
                 ctx = self.remote.cpu(0)
             lib.export_library(dso_binary_path, ndk.create_shared)
-            self.remote.upload(dso_binary_path)
+            remote_path = "/data/local/tmp/" + dso_binary
+            self.remote.upload(dso_binary_path, target=remote_path)
             print("Uploading binary...")
-            rlib = self.remote.load_module(dso_binary)
+            rlib = self.remote.load_module(remote_path)
             m = graph_runtime.create(graph, rlib, ctx)
         else:
             print("Using local runtime")

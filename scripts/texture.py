@@ -2223,9 +2223,10 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
     print("OpenCL source:\n", func.imported_modules[0].get_source())
     print("Binary file located in: ", dso_binary_path)
     tracker, remote = get_remote()
-    remote.upload(dso_binary_path)
+    remote_path = "/data/local/tmp/" + dso_binary
+    remote.upload(dso_binary_path, target=remote_path)
     print("Uploading binary...")
-    func = remote.load_module(dso_binary)
+    func = remote.load_module(remote_path)
     ctx = remote.cl(0)
 
     args_tvm = []
