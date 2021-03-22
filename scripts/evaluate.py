@@ -20,6 +20,7 @@ import numpy as np
 
 import tvm
 from tvm import relay
+from tvm.relay import testing
 from tvm import autotvm
 from tvm.contrib import utils, ndk
 from tvm.topi import testing
@@ -45,8 +46,21 @@ class ModelImporter(object):
     def import_resnet50(self, target="llvm", dtype="float32"):
         model, input_shape = gluon_model("resnet50_v1", batch_size=1)
         mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        # layout transformation
+        layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+        with layout_config:
+            seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+            with tvm.transform.PassContext(opt_level=3):
+                mod = seq(mod)
+        # downcast to float16
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
+
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
         return (mod, params, input_shape, dtype, target)
 
     def import_mobilenetv1(self, target="llvm", dtype="float32"):
@@ -64,6 +78,7 @@ class ModelImporter(object):
         # downcast to float16
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
+
         mod = relay.quantize.prerequisite_optimize(mod, params)
 
         return (mod, params, input_shape, dtype, target)
@@ -71,8 +86,20 @@ class ModelImporter(object):
     def import_vgg16(self, target="llvm", dtype="float32"):
         model, input_shape = gluon_model("vgg16", batch_size=1)
         mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        # layout transformation
+        layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+        with layout_config:
+            seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+            with tvm.transform.PassContext(opt_level=3):
+                mod = seq(mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+        # downcast to float16
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
         return (mod, params, input_shape, dtype, target)
 
     def import_mobilenetv3_ssdlite(self, target="llvm", dtype="float32"):
@@ -86,7 +113,7 @@ class ModelImporter(object):
         model = onnx.load_model(graph_file)
         input_shape = (1, 3, 300, 300)
         input_names, input_shape = get_input_data_shape_dict(model, input_shape)
-        mod, params = relay.frontend.from_onnx(model, input_shape, opset=10, freeze_params=True)
+        mod, params = relay.frontend.from_onnx(model, input_shape, opset=11, freeze_params=True)
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
         from tvm.relay import transform
@@ -106,10 +133,23 @@ class ModelImporter(object):
             model, input_shape["ImageTensor:0"]
         )
         mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11, freeze_params=True)
-        if dtype == "float16":
-            mod = downcast_fp16(mod["main"], mod)
+
         from tvm.relay import transform
         mod = transform.DynamicToStatic()(mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+            mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        # layout transformation
+        layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+        with layout_config:
+            seq = tvm.transform.Sequential([relay.transform.SimplifyExpr(), relay.transform.ConvertLayout(desired_layouts)])
+            with tvm.transform.PassContext(opt_level=3):
+                mod = seq(mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
         return (mod, params, input_shape, dtype, target)
 
     def import_inceptionv3(self, target="llvm", dtype="float32"):
@@ -134,8 +174,53 @@ class ModelImporter(object):
         shape_dict = {'input_1': [1, 299, 299, 3]}
         mod, params = relay.frontend.from_onnx(model, shape_dict, freeze_params=True)
         mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        # layout transformation
+        layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+        with layout_config:
+            seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+            with tvm.transform.PassContext(opt_level=3):
+                mod = seq(mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+        # downcast to float16
+        import ipdb; ipdb.set_trace()
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+
         return (mod, params, shape_dict, dtype, target)
 
+    def import_depthwise_conv2d(self, target="llvm", dtype="float32"):
+        input_shape = (1, 16, 112, 112, 4)
+        filter_shape = (16, 1, 3, 3, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        C = relay.nn.conv2d(A, B, strides=(2,2), padding=(1,1,1,1), groups=64, data_layout="NCHW4c", kernel_layout="OIHW4o", out_dtype=dtype)
+        mod = relay.Function([A, B], C)
+        #mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        initializer("weight", filter_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+        }
+
+        def validator(inputs):
+            vec_length = input_shape[-1]
+            # nchwc -> nchw
+            data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            # kcrsk -> kcrs
+            w_np = params["weight"].asnumpy()
+            kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
+            np_result = testing.conv2d_nchw_python(data, kernel, stride=(2,2), padding=(1,1,1,1), groups=64)
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+            return [np_result,]
+
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
 
     def import_conv2d(self, target="llvm", dtype="float32"):
         input_shape = (1, 32, 112, 112, 4)
@@ -143,8 +228,16 @@ class ModelImporter(object):
         A = relay.var("data", shape=input_shape, dtype=dtype)
         B = relay.var("weight", shape=filter_shape, dtype=dtype)
         C = relay.nn.conv2d(A, B, data_layout="NCHW4c", kernel_layout="OIHW4o", out_dtype=dtype)
-        func = relay.Function([A, B], C)
-        mod, params = relay.testing.init.create_workload(func)
+        mod = relay.Function([A, B], C)
+        #mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        initializer("weight", filter_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+        }
+
         def validator(inputs):
             vec_length = input_shape[-1]
             # nchwc -> nchw
@@ -156,8 +249,8 @@ class ModelImporter(object):
             # nkhw -> nkhwk
             np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
             return [np_result,]
-        #return (mod, params, {"data": input_shape}, dtype, target, validator)
-        return (mod, params, {"data": input_shape}, dtype, target)
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target)
 
 
     def import_conv2d_conv2d(self, target="llvm", dtype="float32"):
@@ -165,16 +258,16 @@ class ModelImporter(object):
         # filter_shape = (128, 128, 3, 3)
         input_shape = (1, 32, 112, 112, 4)
         filter_shape = (32, 128, 3, 3, 4)
-        A = relay.var("data", shape=input_shape, dtype="float32")
-        B1 = relay.var("weight1", shape=filter_shape, dtype="float32")
-        B2 = relay.var("weight2", shape=filter_shape, dtype="float32")
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B1 = relay.var("weight1", shape=filter_shape, dtype=dtype)
+        B2 = relay.var("weight2", shape=filter_shape, dtype=dtype)
         C = relay.nn.conv2d(A, B1, data_layout="NCHW4c", kernel_layout="OIHW4o")
         D = relay.nn.conv2d(C, B2, data_layout="NCHW4c", kernel_layout="OIHW4o")
         mod = relay.Function([A, B1, B2], D)
 
         params = {
-            "weight1": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype("float32")),
-            "weight2": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype("float32")),
+            "weight1": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight2": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
         }
         def validator(inputs):
             vec_length = input_shape[-1]
@@ -191,6 +284,136 @@ class ModelImporter(object):
             np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
             return [np_result,]
         return (mod, params, {"data": input_shape}, dtype, target, validator)
+
+    def import_conv2d_mem_reuse(self, target="llvm", dtype="float32"):
+        # input_shape = (1, 128, 112, 112)
+        # filter_shape = (128, 128, 3, 3)
+        input_shape = (1, 32, 112, 112, 4)
+        filter_shape = (32, 128, 3, 3, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B1 = relay.var("weight1", shape=filter_shape, dtype=dtype)
+        B2 = relay.var("weight2", shape=filter_shape, dtype=dtype)
+        B3 = relay.var("weight3", shape=filter_shape, dtype=dtype)
+        B4 = relay.var("weight4", shape=filter_shape, dtype=dtype)
+        C = relay.nn.conv2d(A, B1, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        D = relay.nn.conv2d(C, B2, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        E = relay.nn.conv2d(D, B3, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        F = relay.nn.conv2d(E, B4, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        mod = relay.Function([A, B1, B2, B3, B4], F)
+
+        params = {
+            "weight1": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight2": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight3": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight4": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+        }
+        def validator(inputs):
+            vec_length = input_shape[-1]
+            # nchwc -> nchw
+            data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            # kcrsk -> kcrs
+            w1_np = params["weight1"].asnumpy()
+            kernel1 = w1_np.transpose((0, 4, 1, 2, 3)).reshape(w1_np.shape[0] * w1_np.shape[4], w1_np.shape[1], w1_np.shape[2], w1_np.shape[3])
+            w2_np = params["weight2"].asnumpy()
+            kernel2 = w2_np.transpose((0, 4, 1, 2, 3)).reshape(w2_np.shape[0] * w2_np.shape[4], w2_np.shape[1], w2_np.shape[2], w2_np.shape[3])
+            w3_np = params["weight3"].asnumpy()
+            kernel3 = w3_np.transpose((0, 4, 1, 2, 3)).reshape(w3_np.shape[0] * w3_np.shape[4], w3_np.shape[1], w3_np.shape[2], w3_np.shape[3])
+            w4_np = params["weight3"].asnumpy()
+            kernel4 = w4_np.transpose((0, 4, 1, 2, 3)).reshape(w4_np.shape[0] * w4_np.shape[4], w4_np.shape[1], w4_np.shape[2], w4_np.shape[3])
+            conv2d = testing.conv2d_nchw_python(data, kernel1, 1, 0)
+            conv2d = testing.conv2d_nchw_python(conv2d, kernel2, 1, 0)
+            conv2d = testing.conv2d_nchw_python(conv2d, kernel3, 1, 0)
+            np_result = testing.conv2d_nchw_python(conv2d, kernel4, 1, 0)
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+            return [np_result,]
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
+
+    def import_conv2d_x4(self, target="llvm", dtype="float32"):
+        input_shape = (1, 3, 224, 224)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        w1_shape = (32, 3, 3, 3)
+        w1 = relay.var("weight1", shape=w1_shape, dtype=dtype)
+        w2_shape = (32, 1, 3, 3)
+        w2 = relay.var("weight2", shape=w2_shape, dtype=dtype)
+        w3_shape = (64, 32, 1, 1)
+        w3 = relay.var("weight3", shape=w3_shape, dtype=dtype)
+        w4_shape = (64, 1, 3, 3)
+        w4 = relay.var("weight4", shape=w4_shape, dtype=dtype)
+
+        B = relay.nn.conv2d(A, w1, strides=[2, 2], padding=[1, 1, 1, 1], channels=32, kernel_size=[3, 3], data_layout="NCHW") # general
+        C = relay.nn.conv2d(B, w2, padding=[1, 1, 1, 1], groups=32, channels=32, kernel_size=[3, 3]) # depthwise
+        D = relay.nn.conv2d(C, w3, padding=[0, 0, 0, 0], channels=64, kernel_size=[1, 1]) # 1x1
+        E = relay.nn.conv2d(D, w4, strides=[2, 2], padding=[1, 1, 1, 1], groups=64, channels=64, kernel_size=[3, 3]) # depthwise strided
+
+        func = relay.Function([A, w1, w2, w3, w4], E)
+        mod = tvm.IRModule.from_expr(func)
+
+        params = {
+            "weight1": tvm.nd.array(np.random.uniform(-1, 1, w1_shape).astype(dtype)),
+            "weight2": tvm.nd.array(np.random.uniform(-1, 1, w2_shape).astype(dtype)),
+            "weight3": tvm.nd.array(np.random.uniform(-1, 1, w3_shape).astype(dtype)),
+            "weight4": tvm.nd.array(np.random.uniform(-1, 1, w4_shape).astype(dtype)),
+        }
+
+        # layout transformation
+        layout_config = relay.transform.LayoutConfig(skip_layers=[0, 3])
+        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+        with layout_config:
+            seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+            with tvm.transform.PassContext(opt_level=3):
+                mod = seq(mod)
+        # downcast to float16
+        # if dtype == "float16":
+        #     mod = downcast_fp16(mod["main"], mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_conv2d_mem_reuse(self, target="llvm", dtype="float32"):
+        # input_shape = (1, 128, 112, 112)
+        # filter_shape = (128, 128, 3, 3)
+        input_shape = (1, 32, 112, 112, 4)
+        filter_shape = (32, 128, 3, 3, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B1 = relay.var("weight1", shape=filter_shape, dtype=dtype)
+        B2 = relay.var("weight2", shape=filter_shape, dtype=dtype)
+        B3 = relay.var("weight3", shape=filter_shape, dtype=dtype)
+        B4 = relay.var("weight4", shape=filter_shape, dtype=dtype)
+        C = relay.nn.conv2d(A, B1, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        D = relay.nn.conv2d(C, B2, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        E = relay.nn.conv2d(D, B3, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        F = relay.nn.conv2d(E, B4, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        mod = relay.Function([A, B1, B2, B3, B4], F)
+
+        params = {
+            "weight1": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight2": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight3": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight4": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+        }
+        def validator(inputs):
+            vec_length = input_shape[-1]
+            # nchwc -> nchw
+            data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            # kcrsk -> kcrs
+            w1_np = params["weight1"].asnumpy()
+            kernel1 = w1_np.transpose((0, 4, 1, 2, 3)).reshape(w1_np.shape[0] * w1_np.shape[4], w1_np.shape[1], w1_np.shape[2], w1_np.shape[3])
+            w2_np = params["weight2"].asnumpy()
+            kernel2 = w2_np.transpose((0, 4, 1, 2, 3)).reshape(w2_np.shape[0] * w2_np.shape[4], w2_np.shape[1], w2_np.shape[2], w2_np.shape[3])
+            w3_np = params["weight3"].asnumpy()
+            kernel3 = w3_np.transpose((0, 4, 1, 2, 3)).reshape(w3_np.shape[0] * w3_np.shape[4], w3_np.shape[1], w3_np.shape[2], w3_np.shape[3])
+            w4_np = params["weight4"].asnumpy()
+            kernel4 = w4_np.transpose((0, 4, 1, 2, 3)).reshape(w4_np.shape[0] * w4_np.shape[4], w4_np.shape[1], w4_np.shape[2], w4_np.shape[3])
+            conv2d = testing.conv2d_nchw_python(data, kernel1, 1, 0)
+            conv2d = testing.conv2d_nchw_python(conv2d, kernel2, 1, 0)
+            conv2d = testing.conv2d_nchw_python(conv2d, kernel3, 1, 0)
+            np_result = testing.conv2d_nchw_python(conv2d, kernel4, 1, 0)
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+            return [np_result,]
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
+
 
 def get_args():
     import argparse
@@ -267,7 +490,7 @@ def get_args():
                 args.rpc_key,
                 host=args.rpc_tracker_host,
                 port=args.rpc_tracker_port,
-                number=3,
+                number=100,
                 timeout=15,
                 #min_repeat_ms=150,
                 #cooldown_interval=150
@@ -520,7 +743,9 @@ class Executor(object):
             m.set_input("data", inputs[-1])
 
         print("Evaluating...")
-        time_f = m.module.time_evaluator("run", ctx, number=10)
+        #print("change number of iter before benchmarking")
+        time_f = m.module.time_evaluator("run", ctx, number=1000)
+        #time_f = m.module.time_evaluator("run", ctx, number=1)
         cost = time_f().mean
         m.run()
         print("%g secs/iteration\n" % cost)
