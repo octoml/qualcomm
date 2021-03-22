@@ -168,14 +168,14 @@ class RPCServer {
         if (timer_pid == 0) {
           // Timer process
           sleep(timeout);
-          _exit(0);
+          exit(0);
         }
 
         const pid_t worker_pid = fork();
         if (worker_pid == 0) {
           // Worker process
           ServerLoopProc(conn, addr);
-          _exit(0);
+          exit(0);
         }
 
         int status = 0;
