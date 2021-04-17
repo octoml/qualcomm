@@ -1020,7 +1020,7 @@ class Executor(object):
         from tvm.autotvm.tuner import GATuner
 
         tmp_log_file = log_filename + ".tmp"
-        if os.path.exists(tmp_log_file):
+        if os.path.exists(tmp_log_file) and use_transfer_learning == False:
             os.remove(tmp_log_file)
 
         for i, tsk in enumerate(reversed(tasks)):
