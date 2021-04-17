@@ -2194,6 +2194,9 @@ def test_texture(target="opencl", target_host="llvm -mtriple=arm64-linux-android
         elif args.test == "conv2d_NCHWc_KCRSk_tx_tune2":
             # NCHWc, KCRSk
             input_shape, filter_shape = (1, 32, 112, 112, 4), (32, 128, 3, 3, 4)
+            # input_shape, filter_shape = (1, 128, 7, 7, 4), (256, 512, 1, 1, 4)
+            # input_shape, filter_shape = (1, 128, 7, 7, 4), (128, 512, 3, 3, 4)
+            # input_shape, filter_shape = (1, 128, 7, 7, 4), (512, 512, 1, 1, 4)
             s, placeholders = tune_and_bench(conv2d_NCHWc_KCRSk_tx_template2, args.test, input_shape, filter_shape)
         elif args.test == "conv2d_NCHWc_KCRSk_tx_fp32acc_tune2":
             # NCHWc, KCRSk

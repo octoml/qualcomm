@@ -256,6 +256,36 @@ class ModelImporter(object):
         return (mod, params, {"data": input_shape}, dtype, target, validator)
         #return (mod, params, {"data": input_shape}, dtype, target)
 
+    def import_conv2d_3x3(self, target="llvm", dtype="float32"):
+        input_shape, filter_shape = (1, 128, 7, 7, 4), (128, 512, 3, 3, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        C = relay.nn.conv2d(A, B, data_layout="NCHW4c", kernel_layout="OIHW4o", padding=[1,1,1,1], out_dtype=dtype)
+        mod = relay.Function([A, B], C)
+        #mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        initializer("weight", filter_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+        }
+
+        def validator(inputs):
+            vec_length = input_shape[-1]
+            # nchwc -> nchw
+            data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            # kcrsk -> kcrs
+            w_np = params["weight"].asnumpy()
+            kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
+            np_result = testing.conv2d_nchw_python(data, kernel, padding=[1,1,1,1], stride=[1,1])
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+            return [np_result,]
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target)
+
+
 
     def import_conv2d_conv2d(self, target="llvm", dtype="float32"):
         # input_shape = (1, 128, 112, 112)
@@ -418,6 +448,169 @@ class ModelImporter(object):
             return [np_result,]
         return (mod, params, {"data": input_shape}, dtype, target, validator)
 
+
+    # fused_nn_conv2d_add_nn_relu_65
+    # fn (%p0: Tensor[(1, 32, 17, 17, 4), float16], %p1: Tensor[(48, 128, 7, 1, 4), float16], %p2: Tensor[(1, 48, 1, 1, 4), float16], Primitive=1) -> Tensor[(1, 48, 17, 17, 4), float16] {
+    #   %0 = nn.conv2d(%p0, %p1, padding=[3, 0, 3, 0], kernel_size=[7, 1], data_layout="NCHW4c", kernel_layout="OIHW4o") /* ty=Tensor[(1, 48, 17, 17, 4), float16] */;
+    #   %1 = add(%0, %p2) /* ty=Tensor[(1, 48, 17, 17, 4), float16] */;
+    #   nn.relu(%1) /* ty=Tensor[(1, 48, 17, 17, 4), float16] */
+    # }
+    def import_conv2d_a6x_compiler_hang(self, target="llvm", dtype="float32"):
+        input_shape, filter_shape, bias_shape = (1, 128, 17, 17), (48, 128, 7, 1, 4), (1, 48, 1, 1, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        C = relay.var("bias", shape=bias_shape, dtype=dtype)
+
+        a = relay.layout_transform(A, src_layout="NCHW", dst_layout="NCHW4c")
+        D = relay.nn.conv2d(a, B, data_layout="NCHW4c", kernel_layout="OIHW4o", padding=[3, 0, 3, 0], kernel_size=[7, 1],  out_dtype=dtype)
+        E = C + D
+        F = relay.nn.relu(E)
+        mod = relay.Function([A, B, C], F)
+        #mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        bias_data = np.ones(bias_shape).astype(dtype)
+        initializer("weight", filter_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+            "bias": tvm.nd.array(bias_data),
+        }
+
+        def validator(inputs):
+            vec_length = 4
+            data = inputs[0]
+            # kcrsk -> kcrs
+            w_np = params["weight"].asnumpy()
+            kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
+            np_result = testing.conv2d_nchw_python(data, kernel, stride=(1,1), padding=(3,0,3,0))
+            bias = params["bias"].asnumpy()
+            bias = bias.transpose((0, 1, 4, 2, 3)).reshape(bias.shape[0], bias.shape[1] * bias.shape[-1], bias.shape[2], bias.shape[3])
+            np_result += bias
+            np_result = np.maximum(np_result, 0)
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+            return [np_result,]
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_conv2d_a6x_compiler_hang_kernel_single_op(self, target="llvm", dtype="float32"):
+        input_shape, filter_shape, bias_shape = (1, 32, 17, 17, 4), (48, 128, 7, 1, 4), (1, 48, 1, 1, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        C = relay.var("bias", shape=bias_shape, dtype=dtype)
+
+        a = relay.nn.relu(A)
+        D = relay.nn.conv2d(a, B, data_layout="NCHW4c", kernel_layout="OIHW4o", padding=[3, 0, 3, 0], kernel_size=[7, 1],  out_dtype=dtype)
+        E = C + D
+        F = relay.nn.relu(E)
+        mod = relay.Function([A, B, C], F)
+        #mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        bias_data = np.ones(bias_shape).astype(dtype)
+        initializer("weight", filter_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+            "bias": tvm.nd.array(bias_data),
+        }
+
+        def validator(inputs):
+            vec_length = 4
+            data = np.maximum(inputs[0], 0)
+            data = data.transpose((0, 1, 4, 2, 3)).reshape(data.shape[0], data.shape[1]*data.shape[-1], data.shape[2], data.shape[3])
+            # kcrsk -> kcrs
+            w_np = params["weight"].asnumpy()
+            kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
+            np_result = testing.conv2d_nchw_python(data, kernel, stride=(1,1), padding=(3,0,3,0))
+            bias = params["bias"].asnumpy()
+            bias = bias.transpose((0, 1, 4, 2, 3)).reshape(bias.shape[0], bias.shape[1] * bias.shape[-1], bias.shape[2], bias.shape[3])
+            np_result += bias
+            np_result = np.maximum(np_result, 0)
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+            return [np_result,]
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_global_pooling(self, target="llvm", dtype="float32"):
+        input_shape = (1, 512, 8, 8, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.nn.global_avg_pool2d(A, layout="NCHW4c")
+        mod = relay.Function([A], B)
+
+        def validator(inputs):
+            np_result = np.apply_over_axes(np.mean, inputs[0], [2, 3])
+            return [np_result,]
+        return (mod, {}, {"data": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_max_pooling(self, target="llvm", dtype="float32"):
+        input_shape = (1, 512, 8, 8, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.nn.max_pool2d(A, pool_size=(8,8), layout="NCHW4c")
+        mod = relay.Function([A], B)
+
+        def validator(inputs):
+            np_result = np.apply_over_axes(np.max, inputs[0], [2, 3])
+            return [np_result,]
+        return (mod, {}, {"data": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_avg_pooling(self, target="llvm", dtype="float32"):
+        input_shape = (1, 512, 8, 8, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.nn.avg_pool2d(A, pool_size=(8,8), layout="NCHW4c")
+        mod = relay.Function([A], B)
+
+        def validator(inputs):
+            np_result = np.apply_over_axes(np.mean, inputs[0], [2, 3])
+            return [np_result,]
+        return (mod, {}, {"data": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_concat(self, target="llvm", dtype="float32"):
+        input_shape = (1, 256, 8, 8, 4)
+        A = relay.var("data1", shape=input_shape, dtype=dtype)
+        B = relay.var("data2", shape=input_shape, dtype=dtype)
+        C = relay.concatenate([A, B], 1)
+        mod = relay.Function([A, B], C)
+
+        def validator(inputs):
+            np_result = np.concatenate(inputs, axis=1)
+            return [np_result,]
+        return (mod, {}, {"data1": input_shape, "data2": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_layout_transform_expand(self, target="llvm", dtype="float32"):
+        input_shape = (1, 128, 8, 8)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.layout_transform(A, src_layout="NCHW", dst_layout="NCHW4c")
+        C = relay.nn.avg_pool2d(B, pool_size=(8,8), layout="NCHW4c")
+        mod = relay.Function([A], C)
+
+        def validator(inputs):
+            vec_length = 4
+            np_result = inputs[0].reshape(inputs[0].shape[0], inputs[0].shape[1]//vec_length, vec_length, inputs[0].shape[2], inputs[0].shape[3]).transpose(0, 1, 3, 4, 2)
+            np_result = np.apply_over_axes(np.mean, np_result, [2, 3])
+            return [np_result,]
+        return (mod, {}, {"data": input_shape}, dtype, target, validator)
+
+    def import_layout_transform_contract(self, target="llvm", dtype="float32"):
+        input_shape = (1, 32, 8, 8, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.nn.avg_pool2d(A, pool_size=(8,8), layout="NCHW4c")
+        C = relay.layout_transform(B, src_layout="NCHW4c", dst_layout="NCHW")
+
+        mod = relay.Function([A], C)
+
+        def validator(inputs):
+            vec_length = 4
+            np_result = np.apply_over_axes(np.mean, inputs[0], [2, 3])
+            np_result = np_result.transpose((0, 1, 4, 2, 3)).reshape(np_result.shape[0], np_result.shape[1]*np_result.shape[-1], np_result.shape[2], np_result.shape[3])
+            return [np_result,]
+        return (mod, {}, {"data": input_shape}, dtype, target, validator)
 
 def get_args():
     import argparse
