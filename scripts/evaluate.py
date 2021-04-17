@@ -940,13 +940,19 @@ class Executor(object):
             inputs.append(np.random.normal(size=input_shape).astype(dtype))
             m.set_input("data", inputs[-1])
 
-        print("Evaluating...")
-        #print("change number of iter before benchmarking")
-        time_f = m.module.time_evaluator("run", ctx, number=1000)
-        #time_f = m.module.time_evaluator("run", ctx, number=1)
+        print("Evaluating...", flush=True)
+
+        # print("change number of iter before benchmarking")
+        # time_f = m.module.time_evaluator("run", ctx, number=1)
+
+        if args.debug:
+            m.run()
+            time_f = m.module.time_evaluator("run", ctx, number=100)
+        else:
+            time_f = m.module.time_evaluator("run", ctx, number=1000)
         cost = time_f().mean
-        m.run()
         print("%g secs/iteration\n" % cost)
+
         if validator:
             ref_outputs = validator(inputs)
             for i, ref_output in enumerate(ref_outputs):
