@@ -906,9 +906,12 @@ class Executor(object):
             self._connect_tracker()
 
         with relay.build_config(opt_level=3):
+            print("Relay model to compile:\n")
+            print(tvm_mod)
             graph, lib, params = relay.build(
                 tvm_mod, target_host=target_host, target=target, params=params
             )
+            print("JSON:\n", graph)
 
         if self.remote:
             print("Using Android OpenCL runtime over RPC")
@@ -1021,6 +1024,7 @@ class Executor(object):
             os.remove(tmp_log_file)
 
         for i, tsk in enumerate(reversed(tasks)):
+            print("Task: ", tsk)
             prefix = "[Task %2d/%2d] " % (i + 1, len(tasks))
             if tuner == "xgb" or tuner == "xgb-rank":
                 tuner_obj = XGBTuner(tsk, loss_type="rank")
