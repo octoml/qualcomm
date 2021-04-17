@@ -1,0 +1,12 @@
+[submodule "dmlc-core"]
+	path = tvm/3rdparty/dmlc-core
+	url = https://github.com/dmlc/dmlc-core
+[submodule "dlpack"]
+	path = tvm/3rdparty/dlpack
+	url = https://github.com/dmlc/dlpack
+[submodule "3rdparty/rang"]
+	path = tvm/3rdparty/rang
+	url = https://github.com/agauniyal/rang
+[submodule "3rdparty/vta-hw"]
+	path = tvm/3rdparty/vta-hw
+	url = https://github.com/apache/incubator-tvm-vta
