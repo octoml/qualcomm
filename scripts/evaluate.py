@@ -49,12 +49,13 @@ class ModelImporter(object):
         mod = relay.quantize.prerequisite_optimize(mod, params)
 
         # layout transformation
-        layout_config = relay.transform.LayoutConfig(skip_layers=[0])
-        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
-        with layout_config:
-            seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
-            with tvm.transform.PassContext(opt_level=3):
-                mod = seq(mod)
+        if "adreno" in target:
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
         # downcast to float16
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
@@ -69,12 +70,13 @@ class ModelImporter(object):
         mod = relay.quantize.prerequisite_optimize(mod, params)
 
         # layout transformation
-        layout_config = relay.transform.LayoutConfig(skip_layers=[0])
-        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
-        with layout_config:
-            seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
-            with tvm.transform.PassContext(opt_level=3):
-                mod = seq(mod)
+        if "adreno" in target:
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
         # downcast to float16
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
@@ -89,13 +91,14 @@ class ModelImporter(object):
         mod = relay.quantize.prerequisite_optimize(mod, params)
 
         # layout transformation
-        layout_config = relay.transform.LayoutConfig(skip_layers=[0])
-        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
-        with layout_config:
-            seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
-            with tvm.transform.PassContext(opt_level=3):
-                mod = seq(mod)
-        mod = relay.quantize.prerequisite_optimize(mod, params)
+        if "adreno" in target:
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
+            mod = relay.quantize.prerequisite_optimize(mod, params)
         # downcast to float16
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
@@ -143,13 +146,14 @@ class ModelImporter(object):
             mod = relay.quantize.prerequisite_optimize(mod, params)
 
         # layout transformation
-        layout_config = relay.transform.LayoutConfig(skip_layers=[0])
-        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
-        with layout_config:
-            seq = tvm.transform.Sequential([relay.transform.SimplifyExpr(), relay.transform.ConvertLayout(desired_layouts)])
-            with tvm.transform.PassContext(opt_level=3):
-                mod = seq(mod)
-        mod = relay.quantize.prerequisite_optimize(mod, params)
+        if "adreno" in target:
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.SimplifyExpr(), relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
+            mod = relay.quantize.prerequisite_optimize(mod, params)
         return (mod, params, input_shape, dtype, target)
 
     def import_inceptionv3(self, target="llvm", dtype="float32"):
@@ -175,16 +179,16 @@ class ModelImporter(object):
         mod, params = relay.frontend.from_onnx(model, shape_dict, freeze_params=True)
         mod = relay.quantize.prerequisite_optimize(mod, params)
 
-        # layout transformation
-        layout_config = relay.transform.LayoutConfig(skip_layers=[0])
-        desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
-        with layout_config:
-            seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
-            with tvm.transform.PassContext(opt_level=3):
-                mod = seq(mod)
-        mod = relay.quantize.prerequisite_optimize(mod, params)
+        if "adreno" in target:
+            # layout transformation
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
+            mod = relay.quantize.prerequisite_optimize(mod, params)
         # downcast to float16
-        import ipdb; ipdb.set_trace()
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
         mod = relay.quantize.prerequisite_optimize(mod, params)
