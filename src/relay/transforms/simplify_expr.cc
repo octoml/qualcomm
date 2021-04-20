@@ -28,6 +28,8 @@
 #include <tvm/relay/transform.h>
 #include <tvm/support/logging.h>
 
+#include <memory>
+
 #include "../op/tensor/transform.h"
 #include "pattern_utils.h"
 
