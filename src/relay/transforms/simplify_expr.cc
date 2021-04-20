@@ -161,7 +161,7 @@ class SimplifyTranspose : public SimplifyPattern {
     return String(new_layout);
   }
 
-  struct RankChangingLayoutDescriptor{
+  struct RankChangingLayoutDescriptor {
     Layout src_layout;
     Layout dst_layout;
     // Either a rank changing layout transform or a transpose
@@ -187,15 +187,14 @@ class SimplifyTranspose : public SimplifyPattern {
           desc->other_transform = call;
         } else {
           ICHECK(desc->src_layout->name == attr->dst_layout)
-            << "Back-to-back layout transforms must have the same intermediate layout: "
-            << desc->src_layout->name << " != " << attr->dst_layout;
+              << "Back-to-back layout transforms must have the same intermediate layout: "
+              << desc->src_layout->name << " != " << attr->dst_layout;
           desc->src_layout = Layout(attr->src_layout);
         }
       }
     }
     return desc;
   }
-
 
   /*
    * \brief Fuse call and it's argument into a single layout_transform operator
@@ -213,9 +212,10 @@ class SimplifyTranspose : public SimplifyPattern {
    * \param The pattern root; the second of two consecutive Transpose/LayoutTransform ops
    */
   Optional<Call> FoldRankChangingLayoutTrans(const Expr& data, const Call& call) const {
-
     auto desc = GetRankChangeDescriptor(call);
-    if (desc == nullptr) { return Optional<Call>{nullptr}; }
+    if (desc == nullptr) {
+      return Optional<Call>{nullptr};
+    }
 
     Optional<Expr> output_layout_trans;
     if (desc->src_layout->axes.size() < desc->dst_layout->axes.size()) {
@@ -230,9 +230,10 @@ class SimplifyTranspose : public SimplifyPattern {
       auto axes = GetTransposeAxisOrder(desc->other_transform, desc->dst_layout->axes.size());
       String new_layout = PermuteLayout(std::string(desc->dst_layout->name), axes);
       output_layout_trans = MakeLayoutTransform(data, desc->src_layout->name, new_layout);
-    } else if (desc->other_transform->attrs.as<LayoutTransformAttrs>()){
+    } else if (desc->other_transform->attrs.as<LayoutTransformAttrs>()) {
       // Fuse two consecutive layout transforms
-      output_layout_trans = MakeLayoutTransform(data, desc->src_layout->name, desc->dst_layout->name);
+      output_layout_trans =
+          MakeLayoutTransform(data, desc->src_layout->name, desc->dst_layout->name);
     }
     return Downcast<Call>(output_layout_trans);
   }
