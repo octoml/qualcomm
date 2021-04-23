@@ -1,6 +1,6 @@
-# Qualcomm TVM Evaluation Repo
+# Qualcomm Adreno TVM Evaluation Repo
 
-***Disclaimer: This is in progress development code and does not reflect the productized final state that will be upstreamed. Important features may be missing and some refactoring is required. All code herein is subject to change.
+***Disclaimer: This is a development repository, texture memory support is currently in the upstreaming process and has been cut from the TVM subtree contained herein. See the TVM discuss forum [RFC](https://discuss.tvm.apache.org/t/rfc-texture-memory-support/9467) for more information and links to relevant PRs.
 
 Last version of TVM this was evaluated on and worked (01/28/2021): `4abbe4902e451cc5a963b8b60a70e548d48ace62`.
 
