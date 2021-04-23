@@ -45,7 +45,8 @@ class ModelImporter(object):
 
     def import_resnet50(self, target="llvm", dtype="float32"):
         model, input_shape = gluon_model("resnet50_v1", batch_size=1)
-        mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
+        shape_dict = {"data": input_shape}
+        mod, params = relay.frontend.from_mxnet(model, shape_dict)
         mod = relay.quantize.prerequisite_optimize(mod, params)
 
         # layout transformation
@@ -59,14 +60,13 @@ class ModelImporter(object):
         # downcast to float16
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
-
         mod = relay.quantize.prerequisite_optimize(mod, params)
-
-        return (mod, params, input_shape, dtype, target)
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict))
 
     def import_mobilenetv1(self, target="llvm", dtype="float32"):
         model, input_shape = gluon_model("mobilenet1.0", batch_size=1)
-        mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
+        shape_dict = {"data": input_shape}
+        mod, params = relay.frontend.from_mxnet(model, shape_dict)
         mod = relay.quantize.prerequisite_optimize(mod, params)
 
         # layout transformation
@@ -82,12 +82,12 @@ class ModelImporter(object):
             mod = downcast_fp16(mod["main"], mod)
 
         mod = relay.quantize.prerequisite_optimize(mod, params)
-
-        return (mod, params, input_shape, dtype, target)
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict))
 
     def import_vgg16(self, target="llvm", dtype="float32"):
         model, input_shape = gluon_model("vgg16", batch_size=1)
-        mod, params = relay.frontend.from_mxnet(model, {"data": input_shape})
+        shape_dict = {"data": input_shape}
+        mod, params = relay.frontend.from_mxnet(model, shape_dict)
         mod = relay.quantize.prerequisite_optimize(mod, params)
 
         # layout transformation
@@ -103,7 +103,7 @@ class ModelImporter(object):
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
         mod = relay.quantize.prerequisite_optimize(mod, params)
-        return (mod, params, input_shape, dtype, target)
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict))
 
     def import_mobilenetv3_ssdlite(self, target="llvm", dtype="float32"):
         import onnx
@@ -194,7 +194,8 @@ class ModelImporter(object):
         mod = relay.quantize.prerequisite_optimize(mod, params)
 
 
-        return (mod, params, shape_dict, dtype, target)
+        #return (mod, params, shape_dict, dtype, target)
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, "NHWC"))
 
     def import_depthwise_conv2d(self, target="llvm", dtype="float32"):
         input_shape = (1, 16, 112, 112, 4)
@@ -246,6 +247,8 @@ class ModelImporter(object):
             vec_length = input_shape[-1]
             # nchwc -> nchw
             data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            # convert reference to float32 for use in testing api which only supports float32 activations
+            data = data.astype("float32")
             # kcrsk -> kcrs
             w_np = params["weight"].asnumpy()
             kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
@@ -253,8 +256,24 @@ class ModelImporter(object):
             # nkhw -> nkhwk
             np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
             return [np_result,]
-        return (mod, params, {"data": input_shape}, dtype, target, validator)
+
+        class classify(Validator):
+            def __init__(self):
+                self.inputs = {"data" : np.random.normal(size=input_shape).astype(dtype)}
+            def GetReference(self):
+                inputs = []
+                for key, data in self.inputs.items():
+                    inputs.append(data)
+                return validator(inputs)
+            def Validate(self, m, ref_outputs):
+                for i, ref_output in enumerate(ref_outputs):
+                    tvm_output = m.get_output(i)
+                    output = tvm_output.asnumpy()
+                    np.testing.assert_allclose(output, ref_output, rtol=1e-3, atol=1e-3)
+
+        #return (mod, params, {"data": input_shape}, dtype, target, validator)
         #return (mod, params, {"data": input_shape}, dtype, target)
+        return (mod, params, {"data": input_shape}, dtype, target, classify())
 
     def import_conv2d_3x3(self, target="llvm", dtype="float32"):
         input_shape, filter_shape = (1, 128, 7, 7, 4), (128, 512, 3, 3, 4)
@@ -701,7 +720,10 @@ args = get_args()
 
 
 def main():
-    executor = Executor(use_tracker="android")
+    if "opencl" in args.target:
+        executor = Executor(use_tracker="android")
+    else:
+        executor = Executor()
     executor.schedule(args.model, target=args.target, dtype=args.type)
     if args.tune:
         executor.tune_pending_benchmarks()
@@ -837,6 +859,82 @@ def gluon_model(name, batch_size=None):
 
     return model, data_shape
 
+class Validator(object):
+    def __init__(self, inputs):
+        if isinstance(inputs, dict):
+            self.inputs = inputs
+        else:
+            assert len(inputs) == 1
+            self.inputs = {"data" : inputs[0]}
+    def GetReference(self):
+        return []
+    def Validate(self):
+        return None
+    def GetInputDictionary(self):
+        return self.inputs
+
+class ImageNetValidator(Validator):
+    def __init__(self, shape_dict, layout="NCHW"):
+        assert layout in ("NCHW", "NHWC"), "Requested layout is not currently supported"
+        assert len(shape_dict) == 1
+        from PIL import Image
+        from tvm.contrib import download
+        from os.path import join, isfile
+        from matplotlib import pyplot as plt
+
+        name = list(shape_dict.keys())[0]
+
+        # Download ImageNet categories
+        categ_url = "https://github.com/uwsampl/web-data/raw/main/vta/models/"
+        categ_fn = "synset.txt"
+        download.download(join(categ_url, categ_fn), categ_fn)
+        self.synset = eval(open(categ_fn).read())
+
+        # Download test image
+        image_url = "https://homes.cs.washington.edu/~moreau/media/vta/cat.jpg"
+        image_fn = "cat.png"
+        download.download(image_url, image_fn)
+
+        # Prepare test image for inference
+        #import ipdb; ipdb.set_trace()
+        image = Image.open(image_fn)
+        if layout == "NHWC":
+            image = image.resize(shape_dict[name][1:-1])
+        elif layout == "NCHW":
+            image = image.resize(shape_dict[name][2:])
+        image = np.array(image) - np.array([123.0, 117.0, 104.0])
+        image /= np.array([58.395, 57.12, 57.375])
+        if layout == "NCHW":
+            image = image.transpose((2, 0, 1))
+        image = image[np.newaxis, :]
+        self.inputs = {name : image}
+        #image = np.repeat(image, env.BATCH, axis=0)
+
+    def Validate(self, m, ref_outputs=[]):
+        tvm_output = m.get_output(0)
+        #import ipdb; ipdb.set_trace()
+        top_categories = np.argsort(tvm_output.asnumpy()[0])
+        # Report top-5 classification results
+        print("\nTop5 predictions: \n")
+        top5 = np.flip(top_categories, axis=0)[:5]
+        # print("\t#1:", self.synset[top_categories[-1]])
+        # print("\t#2:", self.synset[top_categories[-2]])
+        # print("\t#3:", self.synset[top_categories[-3]])
+        # print("\t#4:", self.synset[top_categories[-4]])
+        # print("\t#5:", self.synset[top_categories[-5]])
+        print("\t#1:", self.synset[top5[1-1]])
+        print("\t#2:", self.synset[top5[2-1]])
+        print("\t#3:", self.synset[top5[3-1]])
+        print("\t#4:", self.synset[top5[4-1]])
+        print("\t#5:", self.synset[top5[5-1]])
+        print("\t", top5)
+        ImageNetClassifier = False
+        for k in top_categories[-5:]:
+            if "cat" in self.synset[k]:
+                ImageNetClassifier = True
+        assert ImageNetClassifier, "Failed ImageNet classifier validation check"
+
+
 
 class Executor(object):
     def __init__(self, use_tracker=False):
@@ -935,7 +1033,11 @@ class Executor(object):
 
         m.set_input(**params)
         inputs = []
-        if isinstance(input_shape, dict):
+        if isinstance(validator, Validator):
+            inputs = validator.GetInputDictionary()
+            for key, data in inputs.items():
+                m.set_input(key, data)
+        elif isinstance(input_shape, dict):
             for key in input_shape:
                 inputs.append(np.random.normal(size=input_shape[key]).astype(dtype))
                 m.set_input(key, inputs[-1])
@@ -945,8 +1047,7 @@ class Executor(object):
 
         print("Evaluating...", flush=True)
 
-        # print("change number of iter before benchmarking")
-        # time_f = m.module.time_evaluator("run", ctx, number=1)
+        #print("change number of iter before benchmarking")
 
         if args.debug:
             m.run()
@@ -957,11 +1058,15 @@ class Executor(object):
         print("%g secs/iteration\n" % cost)
 
         if validator:
-            ref_outputs = validator(inputs)
-            for i, ref_output in enumerate(ref_outputs):
-                tvm_output = m.get_output(i)
-                output = tvm_output.asnumpy()
-                np.testing.assert_allclose(output, ref_output, rtol=1e-3, atol=1e-3)
+            if isinstance(validator, Validator):
+                ref_outputs = validator.GetReference()
+                validator.Validate(m, ref_outputs)
+            else:
+                ref_outputs = validator(inputs)
+                for i, ref_output in enumerate(ref_outputs):
+                    tvm_output = m.get_output(i)
+                    output = tvm_output.asnumpy()
+                    np.testing.assert_allclose(output, ref_output, rtol=1e-3, atol=1e-3)
             print("Validation done")
 
 
@@ -992,14 +1097,7 @@ class Executor(object):
             def tuned_benchmark():
                 print("Apply best performing tuning profiles:")
                 with autotvm.apply_history_best(options["log_filename"]):
-                    self._benchmark(
-                        mod,
-                        params,
-                        input_shape,
-                        target=target,
-                        target_host=self.host_target,
-                        validator=validator
-                    )
+                    bench()
 
             self.benchmarks.pop(benchmark_index)
             self.benchmarks.append(tuned_benchmark)
