@@ -261,9 +261,11 @@ class OpenCLWorkspace : public DeviceAPI {
   void StreamSync(TVMContext ctx, TVMStreamHandle stream) final;
   void* AllocWorkspace(TVMContext ctx, size_t size, DLDataType type_hint) final;
   void FreeWorkspace(TVMContext ctx, void* data) final;
-  void* AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) final;
-  void* AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) final;
-  void FreeTextureWorkspace(TVMContext ctx, void* data) final;
+
+  // Texture (image2d_t) alloca APIs
+  cl_mem AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint);
+  void* AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint);
+  void FreeTextureWorkspace(TVMContext ctx, void* data);
 
   /*!
    * \brief Get the thread local ThreadEntry
