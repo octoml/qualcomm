@@ -21,10 +21,10 @@
  * \file texture_pool.h
  * \brief Texture pool utility.
  */
-#include "texture.h"
-
 #include <limits>
 #include <memory>
+
+#include "../texture.h"
 
 namespace tvm {
 namespace runtime {
