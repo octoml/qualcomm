@@ -260,25 +260,19 @@ class StorageInfo : private ExprVisitor{
       if (attrs->data_layout == "NCHW4c" && attrs->kernel_layout == "OIHW4o") {
         supports_texture_storage = true;
       }
+    } else if (auto attrs = call->attrs.as<GlobalPool2DAttrs>()) {
+      if (attrs->layout == "NCHW4c") {
+        supports_texture_storage = true;
+      }
+    } else if (auto attrs = call->attrs.as<MaxPool2DAttrs>()) {
+      if (attrs->layout == "NCHW4c") {
+        supports_texture_storage = true;
+      }
+    } else if (auto attrs = call->attrs.as<AvgPool2DAttrs>()) {
+      if (attrs->layout == "NCHW4c") {
+        supports_texture_storage = true;
+      }
     }
-    //  else if (auto attrs = call->attrs.as<GlobalPool2DAttrs>()) {
-    //   if (attrs->layout == "NCHW4c") {
-    //     supports_texture_storage = true;
-    //   }
-    //
-    // MaxPool2DAttrs is buggy
-    // } else if (auto attrs = call->attrs.as<MaxPool2DAttrs>()) {
-    //   if (attrs->layout == "NCHW4c") {
-    //     supports_texture_storage = true;
-    //   }
-    // } else if (auto attrs = call->attrs.as<AvgPool2DAttrs>()) {
-    //   if (attrs->layout == "NCHW4c") {
-    //     supports_texture_storage = true;
-    //   }
-    // }
-    // else if (call->attrs.as<ConcatenateAttrs>()) {
-    //   supports_texture_storage = true;
-    // }
 
     return supports_texture_storage;
   }
