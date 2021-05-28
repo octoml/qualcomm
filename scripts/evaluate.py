@@ -61,7 +61,7 @@ class ModelImporter(object):
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
         mod = relay.quantize.prerequisite_optimize(mod, params)
-        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict))
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, preproc="mxnet"))
 
     def import_mobilenetv1(self, target="llvm", dtype="float32"):
         model, input_shape = gluon_model("mobilenet1.0", batch_size=1)
@@ -82,7 +82,7 @@ class ModelImporter(object):
             mod = downcast_fp16(mod["main"], mod)
 
         mod = relay.quantize.prerequisite_optimize(mod, params)
-        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict))
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, preproc="mxnet"))
 
     def import_vgg16(self, target="llvm", dtype="float32"):
         model, input_shape = gluon_model("vgg16", batch_size=1)
@@ -103,7 +103,7 @@ class ModelImporter(object):
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
         mod = relay.quantize.prerequisite_optimize(mod, params)
-        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict))
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, preproc="mxnet"))
 
     def import_mobilenetv3_ssdlite(self, target="llvm", dtype="float32"):
         import onnx
@@ -195,7 +195,7 @@ class ModelImporter(object):
 
 
         #return (mod, params, shape_dict, dtype, target)
-        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, "NHWC"))
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, "NHWC", preproc="keras"))
 
     def import_depthwise_conv2d(self, target="llvm", dtype="float32"):
         input_shape = (1, 16, 112, 112, 4)
@@ -217,6 +217,7 @@ class ModelImporter(object):
             vec_length = input_shape[-1]
             # nchwc -> nchw
             data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            data = data.astype("float32")
             # kcrsk -> kcrs
             w_np = params["weight"].asnumpy()
             kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
@@ -226,6 +227,37 @@ class ModelImporter(object):
             return [np_result,]
 
         return (mod, params, {"data": input_shape}, dtype, target, validator)
+
+    def import_conv2d_nchw(self, target="llvm", dtype="float32"):
+        input_shape = (1, 128, 112, 112)
+        filter_shape = (128, 128, 3, 3)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        #C = relay.nn.relu(A)
+        C = relay.nn.conv2d(A, B, data_layout="NCHW", kernel_layout="OIHW", out_dtype=dtype, channels=128, kernel_size=(3,3))
+        mod = relay.Function([A, B], C)
+        # mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        initializer("weight", filter_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+        }
+
+        # def validator(inputs):
+        #     vec_length = input_shape[-1]
+        #     # nchwc -> nchw
+        #     data = inputs[0]
+        #     # convert reference to float32 for use in testing api which only supports float32 activations
+        #     data = data.astype("float32")
+        #     # kcrsk -> kcrs
+        #     w_np = params["weight"].asnumpy()
+        #     kernel = w_np
+        #     np_result = testing.conv2d_nchw_python(data, kernel, 1, 0)
+        #     return [np_result,]
+
+        return (mod, params, {"data": input_shape}, dtype, target)
 
     def import_conv2d(self, target="llvm", dtype="float32"):
         input_shape = (1, 32, 112, 112, 4)
@@ -257,23 +289,7 @@ class ModelImporter(object):
             np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
             return [np_result,]
 
-        class classify(Validator):
-            def __init__(self):
-                self.inputs = {"data" : np.random.normal(size=input_shape).astype(dtype)}
-            def GetReference(self):
-                inputs = []
-                for key, data in self.inputs.items():
-                    inputs.append(data)
-                return validator(inputs)
-            def Validate(self, m, ref_outputs):
-                for i, ref_output in enumerate(ref_outputs):
-                    tvm_output = m.get_output(i)
-                    output = tvm_output.asnumpy()
-                    np.testing.assert_allclose(output, ref_output, rtol=1e-3, atol=1e-3)
-
-        #return (mod, params, {"data": input_shape}, dtype, target, validator)
-        #return (mod, params, {"data": input_shape}, dtype, target)
-        return (mod, params, {"data": input_shape}, dtype, target, classify())
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
 
     def import_conv2d_3x3(self, target="llvm", dtype="float32"):
         input_shape, filter_shape = (1, 128, 7, 7, 4), (128, 512, 3, 3, 4)
@@ -294,6 +310,7 @@ class ModelImporter(object):
             vec_length = input_shape[-1]
             # nchwc -> nchw
             data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            data = data.astype("float32")
             # kcrsk -> kcrs
             w_np = params["weight"].asnumpy()
             kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
@@ -326,6 +343,7 @@ class ModelImporter(object):
             vec_length = input_shape[-1]
             # nchwc -> nchw
             data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            data = data.astype("float32")
             # kcrsk -> kcrs
             w1_np = params["weight1"].asnumpy()
             kernel1 = w1_np.transpose((0, 4, 1, 2, 3)).reshape(w1_np.shape[0] * w1_np.shape[4], w1_np.shape[1], w1_np.shape[2], w1_np.shape[3])
@@ -339,26 +357,24 @@ class ModelImporter(object):
         return (mod, params, {"data": input_shape}, dtype, target, validator)
 
     def import_conv2d_mem_reuse(self, target="llvm", dtype="float32"):
-        # input_shape = (1, 128, 112, 112)
-        # filter_shape = (128, 128, 3, 3)
         input_shape = (1, 32, 112, 112, 4)
         filter_shape = (32, 128, 3, 3, 4)
+        W1 = relay.var("weight1", shape=filter_shape, dtype=dtype)
+        W2 = relay.var("weight2", shape=filter_shape, dtype=dtype)
+        W3 = relay.var("weight3", shape=filter_shape, dtype=dtype)
+        W4 = relay.var("weight4", shape=filter_shape, dtype=dtype)
         A = relay.var("data", shape=input_shape, dtype=dtype)
-        B1 = relay.var("weight1", shape=filter_shape, dtype=dtype)
-        B2 = relay.var("weight2", shape=filter_shape, dtype=dtype)
-        B3 = relay.var("weight3", shape=filter_shape, dtype=dtype)
-        B4 = relay.var("weight4", shape=filter_shape, dtype=dtype)
-        C = relay.nn.conv2d(A, B1, data_layout="NCHW4c", kernel_layout="OIHW4o")
-        D = relay.nn.conv2d(C, B2, data_layout="NCHW4c", kernel_layout="OIHW4o")
-        E = relay.nn.conv2d(D, B3, data_layout="NCHW4c", kernel_layout="OIHW4o")
-        F = relay.nn.conv2d(E, B4, data_layout="NCHW4c", kernel_layout="OIHW4o")
-        mod = relay.Function([A, B1, B2, B3, B4], F)
+        B = relay.nn.conv2d(A, W1, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        C = relay.nn.conv2d(B, W2, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        D = relay.nn.conv2d(C, W3, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        E = relay.nn.conv2d(D, W4, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        mod = relay.Function([A, W1, W2, W3, W4], E)
 
         params = {
-            "weight1": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
-            "weight2": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
-            "weight3": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
-            "weight4": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight1": tvm.nd.array(np.random.uniform(0.5, 1.5, filter_shape).astype(dtype)),
+            "weight2": tvm.nd.array(np.random.uniform(0.5, 1.5, filter_shape).astype(dtype)),
+            "weight3": tvm.nd.array(np.random.uniform(0.5, 1.5, filter_shape).astype(dtype)),
+            "weight4": tvm.nd.array(np.random.uniform(0.5, 1.5, filter_shape).astype(dtype)),
         }
         def validator(inputs):
             vec_length = input_shape[-1]
@@ -371,12 +387,85 @@ class ModelImporter(object):
             kernel2 = w2_np.transpose((0, 4, 1, 2, 3)).reshape(w2_np.shape[0] * w2_np.shape[4], w2_np.shape[1], w2_np.shape[2], w2_np.shape[3])
             w3_np = params["weight3"].asnumpy()
             kernel3 = w3_np.transpose((0, 4, 1, 2, 3)).reshape(w3_np.shape[0] * w3_np.shape[4], w3_np.shape[1], w3_np.shape[2], w3_np.shape[3])
-            w4_np = params["weight3"].asnumpy()
+            w4_np = params["weight4"].asnumpy()
             kernel4 = w4_np.transpose((0, 4, 1, 2, 3)).reshape(w4_np.shape[0] * w4_np.shape[4], w4_np.shape[1], w4_np.shape[2], w4_np.shape[3])
             conv2d = testing.conv2d_nchw_python(data, kernel1, 1, 0)
             conv2d = testing.conv2d_nchw_python(conv2d, kernel2, 1, 0)
             conv2d = testing.conv2d_nchw_python(conv2d, kernel3, 1, 0)
-            np_result = testing.conv2d_nchw_python(conv2d, kernel4, 1, 0)
+            conv2d = testing.conv2d_nchw_python(conv2d, kernel4, 1, 0)
+            np_result = conv2d
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+            return [np_result,]
+
+        class classify(Validator):
+            def __init__(self):
+                self.inputs = {"data" : np.random.uniform(0.5, 1.5, input_shape).astype(dtype)}
+            def GetReference(self):
+                inputs = []
+                for key, data in self.inputs.items():
+                    inputs.append(data)
+                return validator(inputs)
+            def Validate(self, m, ref_outputs):
+                for i, ref_output in enumerate(ref_outputs):
+                    tvm_output = m.get_output(i)
+                    output = tvm_output.asnumpy()
+                    np.testing.assert_allclose(output, ref_output, rtol=1e-3, atol=1e-3)
+
+
+
+
+        return (mod, params, {"data": input_shape}, dtype, target, classify())
+
+    def import_conv2d_mem_reuse1(self, target="llvm", dtype="float32"):
+        #input_shape = (1, 1, 112, 112, 4)
+        input_shape = (1, 4, 112, 112)
+        filter_shape = (1, 4, 2, 2, 4)
+        #A = relay.var("data", shape=input_shape, dtype=dtype)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B1 = relay.var("weight1", shape=filter_shape, dtype=dtype)
+        B2 = relay.var("weight2", shape=filter_shape, dtype=dtype)
+        B3 = relay.var("weight3", shape=filter_shape, dtype=dtype)
+        B4 = relay.var("weight4", shape=filter_shape, dtype=dtype)
+        Ap = relay.layout_transform(A, src_layout="NCHW", dst_layout="NCHW4c")
+        C0 = relay.nn.conv2d(Ap, B1, data_layout="NCHW4c", kernel_layout="OIHW4o")
+        C = relay.nn.relu(C0)
+        D0 = relay.nn.conv2d(C, B2,  data_layout="NCHW4c", kernel_layout="OIHW4o")
+        D = relay.nn.relu(D0)
+        E0 = relay.nn.conv2d(D, B3,  data_layout="NCHW4c", kernel_layout="OIHW4o")
+        E = relay.nn.relu(E0)
+        F0 = relay.nn.conv2d(E, B4,  data_layout="NCHW4c", kernel_layout="OIHW4o")
+        F = relay.nn.relu(F0)
+        mod = relay.Function([A, B1, B2, B3, B4], F)
+
+        params = {
+            "weight1": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight2": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight3": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+            "weight4": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
+        }
+        def validator(inputs):
+            vec_length = 4
+            # nchwc -> nchw
+            data = inputs[0]
+            # kcrsk -> kcrs
+            w1_np = params["weight1"].asnumpy()
+            kernel1 = w1_np.transpose((0, 4, 1, 2, 3)).reshape(w1_np.shape[0] * w1_np.shape[4], w1_np.shape[1], w1_np.shape[2], w1_np.shape[3])
+            w2_np = params["weight2"].asnumpy()
+            kernel2 = w2_np.transpose((0, 4, 1, 2, 3)).reshape(w2_np.shape[0] * w2_np.shape[4], w2_np.shape[1], w2_np.shape[2], w2_np.shape[3])
+            w3_np = params["weight3"].asnumpy()
+            kernel3 = w3_np.transpose((0, 4, 1, 2, 3)).reshape(w3_np.shape[0] * w3_np.shape[4], w3_np.shape[1], w3_np.shape[2], w3_np.shape[3])
+            w4_np = params["weight3"].asnumpy()
+            kernel4 = w4_np.transpose((0, 4, 1, 2, 3)).reshape(w4_np.shape[0] * w4_np.shape[4], w4_np.shape[1], w4_np.shape[2], w4_np.shape[3])
+            conv2d = testing.conv2d_nchw_python(data, kernel1, 1, 0)
+            conv2d = np.maximum(conv2d, 0)
+            conv2d = testing.conv2d_nchw_python(conv2d, kernel2, 1, 0)
+            conv2d = np.maximum(conv2d, 0)
+            conv2d = testing.conv2d_nchw_python(conv2d, kernel3, 1, 0)
+            conv2d = np.maximum(conv2d, 0)
+            conv2d = testing.conv2d_nchw_python(conv2d, kernel4, 1, 0)
+            conv2d = np.maximum(conv2d, 0)
+            np_result = conv2d
             # nkhw -> nkhwk
             np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
             return [np_result,]
@@ -423,51 +512,6 @@ class ModelImporter(object):
 
         return (mod, params, {"data": input_shape}, dtype, target)
 
-    def import_conv2d_mem_reuse(self, target="llvm", dtype="float32"):
-        # input_shape = (1, 128, 112, 112)
-        # filter_shape = (128, 128, 3, 3)
-        input_shape = (1, 32, 112, 112, 4)
-        filter_shape = (32, 128, 3, 3, 4)
-        A = relay.var("data", shape=input_shape, dtype=dtype)
-        B1 = relay.var("weight1", shape=filter_shape, dtype=dtype)
-        B2 = relay.var("weight2", shape=filter_shape, dtype=dtype)
-        B3 = relay.var("weight3", shape=filter_shape, dtype=dtype)
-        B4 = relay.var("weight4", shape=filter_shape, dtype=dtype)
-        C = relay.nn.conv2d(A, B1, data_layout="NCHW4c", kernel_layout="OIHW4o")
-        D = relay.nn.conv2d(C, B2, data_layout="NCHW4c", kernel_layout="OIHW4o")
-        E = relay.nn.conv2d(D, B3, data_layout="NCHW4c", kernel_layout="OIHW4o")
-        F = relay.nn.conv2d(E, B4, data_layout="NCHW4c", kernel_layout="OIHW4o")
-        mod = relay.Function([A, B1, B2, B3, B4], F)
-
-        params = {
-            "weight1": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
-            "weight2": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
-            "weight3": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
-            "weight4": tvm.nd.array(np.random.uniform(-1, 1, filter_shape).astype(dtype)),
-        }
-        def validator(inputs):
-            vec_length = input_shape[-1]
-            # nchwc -> nchw
-            data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
-            # kcrsk -> kcrs
-            w1_np = params["weight1"].asnumpy()
-            kernel1 = w1_np.transpose((0, 4, 1, 2, 3)).reshape(w1_np.shape[0] * w1_np.shape[4], w1_np.shape[1], w1_np.shape[2], w1_np.shape[3])
-            w2_np = params["weight2"].asnumpy()
-            kernel2 = w2_np.transpose((0, 4, 1, 2, 3)).reshape(w2_np.shape[0] * w2_np.shape[4], w2_np.shape[1], w2_np.shape[2], w2_np.shape[3])
-            w3_np = params["weight3"].asnumpy()
-            kernel3 = w3_np.transpose((0, 4, 1, 2, 3)).reshape(w3_np.shape[0] * w3_np.shape[4], w3_np.shape[1], w3_np.shape[2], w3_np.shape[3])
-            w4_np = params["weight4"].asnumpy()
-            kernel4 = w4_np.transpose((0, 4, 1, 2, 3)).reshape(w4_np.shape[0] * w4_np.shape[4], w4_np.shape[1], w4_np.shape[2], w4_np.shape[3])
-            conv2d = testing.conv2d_nchw_python(data, kernel1, 1, 0)
-            conv2d = testing.conv2d_nchw_python(conv2d, kernel2, 1, 0)
-            conv2d = testing.conv2d_nchw_python(conv2d, kernel3, 1, 0)
-            np_result = testing.conv2d_nchw_python(conv2d, kernel4, 1, 0)
-            # nkhw -> nkhwk
-            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
-            return [np_result,]
-        return (mod, params, {"data": input_shape}, dtype, target, validator)
-
-
     # fused_nn_conv2d_add_nn_relu_65
     # fn (%p0: Tensor[(1, 32, 17, 17, 4), float16], %p1: Tensor[(48, 128, 7, 1, 4), float16], %p2: Tensor[(1, 48, 1, 1, 4), float16], Primitive=1) -> Tensor[(1, 48, 17, 17, 4), float16] {
     #   %0 = nn.conv2d(%p0, %p1, padding=[3, 0, 3, 0], kernel_size=[7, 1], data_layout="NCHW4c", kernel_layout="OIHW4o") /* ty=Tensor[(1, 48, 17, 17, 4), float16] */;
@@ -498,7 +542,7 @@ class ModelImporter(object):
 
         def validator(inputs):
             vec_length = 4
-            data = inputs[0]
+            data = inputs[0].astype("float32")
             # kcrsk -> kcrs
             w_np = params["weight"].asnumpy()
             kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
@@ -539,6 +583,7 @@ class ModelImporter(object):
             vec_length = 4
             data = np.maximum(inputs[0], 0)
             data = data.transpose((0, 1, 4, 2, 3)).reshape(data.shape[0], data.shape[1]*data.shape[-1], data.shape[2], data.shape[3])
+            data = data.astype("float32")
             # kcrsk -> kcrs
             w_np = params["weight"].asnumpy()
             kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
@@ -572,7 +617,24 @@ class ModelImporter(object):
         mod = relay.Function([A], B)
 
         def validator(inputs):
-            np_result = np.apply_over_axes(np.max, inputs[0], [2, 3])
+            #np_result = np.apply_over_axes(np.max, inputs[0], [2, 3])
+            import skimage.measure
+            np_result = skimage.measure.block_reduce(inputs[0], (1, 1, 8, 8, 1), np.max)
+            return [np_result,]
+
+            return [np_result,]
+        return (mod, {}, {"data": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_max_pooling2(self, target="llvm", dtype="float32"):
+        input_shape = (1, 16, 224, 224, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.nn.max_pool2d(A, pool_size=(2, 2), strides=(2,2), layout="NCHW4c")
+        mod = relay.Function([A], B)
+
+        def validator(inputs):
+            import skimage.measure
+            np_result = skimage.measure.block_reduce(inputs[0], (1, 1, 2, 2, 1), np.max)
             return [np_result,]
         return (mod, {}, {"data": input_shape}, dtype, target, validator)
         #return (mod, params, {"data": input_shape}, dtype, target)
@@ -590,16 +652,24 @@ class ModelImporter(object):
         #return (mod, params, {"data": input_shape}, dtype, target)
 
     def import_concat(self, target="llvm", dtype="float32"):
-        input_shape = (1, 256, 8, 8, 4)
-        A = relay.var("data1", shape=input_shape, dtype=dtype)
-        B = relay.var("data2", shape=input_shape, dtype=dtype)
-        C = relay.concatenate([A, B], 1)
+        input_shape1 = (1, 80, 8, 8)
+        input_shape2 = (1, 432, 8, 8)
+        A = relay.var("data1", shape=input_shape1, dtype=dtype)
+        B = relay.var("data2", shape=input_shape2, dtype=dtype)
+        Ap = relay.layout_transform(A, src_layout="NCHW", dst_layout="NCHW4c")
+        Bp = relay.layout_transform(B, src_layout="NCHW", dst_layout="NCHW4c")
+        Ap = relay.nn.max_pool2d(Ap, pool_size=(1,1), layout="NCHW4c")
+        Bp = relay.nn.max_pool2d(Bp, pool_size=(1,1), layout="NCHW4c")
+        Cp = relay.concatenate([Ap, Bp], axis=1)
+        Cp = relay.nn.max_pool2d(Cp, pool_size=(1,1), layout="NCHW4c")
+        C = relay.layout_transform(Cp, src_layout="NCHW4c", dst_layout="NCHW")
         mod = relay.Function([A, B], C)
 
         def validator(inputs):
+            print([i.shape for i in inputs])
             np_result = np.concatenate(inputs, axis=1)
             return [np_result,]
-        return (mod, {}, {"data1": input_shape, "data2": input_shape}, dtype, target, validator)
+        return (mod, {}, {"data1": input_shape1, "data2": input_shape2}, dtype, target, validator)
         #return (mod, params, {"data": input_shape}, dtype, target)
 
     def import_layout_transform_expand(self, target="llvm", dtype="float32"):
@@ -630,6 +700,7 @@ class ModelImporter(object):
             np_result = np_result.transpose((0, 1, 4, 2, 3)).reshape(np_result.shape[0], np_result.shape[1]*np_result.shape[-1], np_result.shape[2], np_result.shape[3])
             return [np_result,]
         return (mod, {}, {"data": input_shape}, dtype, target, validator)
+
 
 def get_args():
     import argparse
@@ -874,8 +945,8 @@ class Validator(object):
         return self.inputs
 
 class ImageNetValidator(Validator):
-    def __init__(self, shape_dict, layout="NCHW"):
-        assert layout in ("NCHW", "NHWC"), "Requested layout is not currently supported"
+    def __init__(self, shape_dict, layout="NCHW", preproc=None):
+        assert layout in ("NCHW", "NHWC"), "Requested layout is not currently supported: " + layout
         assert len(shape_dict) == 1
         from PIL import Image
         from tvm.contrib import download
@@ -902,13 +973,19 @@ class ImageNetValidator(Validator):
             image = image.resize(shape_dict[name][1:-1])
         elif layout == "NCHW":
             image = image.resize(shape_dict[name][2:])
-        image = np.array(image) - np.array([123.0, 117.0, 104.0])
-        image /= np.array([58.395, 57.12, 57.375])
-        if layout == "NCHW":
+
+        #image = self.preprocess(np.array(image))
+        if "mxnet" in preproc:
+            image = np.array(image) - np.array([123.0, 117.0, 104.0])
+            image /= np.array([58.395, 57.12, 57.375])
             image = image.transpose((2, 0, 1))
-        image = image[np.newaxis, :]
+            image = image[np.newaxis, :]
+        elif "keras" in preproc:
+            image = np.array(image)[np.newaxis, :].astype("float32")
+            from keras.applications.resnet50 import preprocess_input
+            image = preprocess_input(image)
+
         self.inputs = {name : image}
-        #image = np.repeat(image, env.BATCH, axis=0)
 
     def Validate(self, m, ref_outputs=[]):
         tvm_output = m.get_output(0)
