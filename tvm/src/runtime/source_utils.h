@@ -18,24 +18,27 @@
  */
 
 /*!
- * \file tir/op/runtime.cc
- * \brief TIR ops for runtime functions.
+ * \file source_utils.h
+ * \brief Minimum source manipulation utils for runtime.
  */
-#include <tvm/ir/op.h>
-#include <tvm/tir/op_attr_types.h>
+
+#ifndef TVM_RUNTIME_SOURCE_UTILS_H_
+#define TVM_RUNTIME_SOURCE_UTILS_H_
+
+#include <string>
+#include <unordered_map>
 
 namespace tvm {
-namespace tir {
-
-TVM_REGISTER_OP("tir.TVMBackendAllocWorkspace")
-    .set_num_inputs(5)
-    .set_attr<TGlobalSymbol>("TGlobalSymbol", "TVMBackendAllocWorkspace")
-    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
-
-TVM_REGISTER_OP("tir.TVMBackendFreeWorkspace")
-    .set_num_inputs(3)
-    .set_attr<TGlobalSymbol>("TGlobalSymbol", "TVMBackendFreeWorkspace")
-    .set_attr<TCallEffectKind>("TCallEffectKind", Integer(CallEffectKind::kOpaque));
-
-}  // namespace tir
+namespace runtime {
+/*!
+ * \brief Split the source file on separate kernels by specified delimiter.
+ * \param source The source code of the kernels.
+ * \param delimiter The delimiter which is using for splitting kernels.
+ * \return Mapping from primitive name to kernel source
+ */
+std::unordered_map<std::string, std::string> SplitKernels(std::string source,
+                                                          std::string delimiter = "// Function: ");
+}  // namespace runtime
 }  // namespace tvm
+
+#endif  // TVM_RUNTIME_SOURCE_UTILS_H_

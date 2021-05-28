@@ -261,9 +261,11 @@ class OpenCLWorkspace : public DeviceAPI {
   void StreamSync(TVMContext ctx, TVMStreamHandle stream) final;
   void* AllocWorkspace(TVMContext ctx, size_t size, DLDataType type_hint) final;
   void FreeWorkspace(TVMContext ctx, void* data) final;
-  void* AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) final;
-  void* AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint) final;
-  void FreeTextureWorkspace(TVMContext ctx, void* data) final;
+
+  // Texture (image2d_t) alloca APIs
+  cl_mem AllocTexture(TVMContext ctx, size_t width, size_t height, DLDataType type_hint);
+  void* AllocTextureWorkspace(TVMContext ctx, size_t width, size_t height, DLDataType type_hint);
+  void FreeTextureWorkspace(TVMContext ctx, void* data);
 
   /*!
    * \brief Get the thread local ThreadEntry
@@ -308,6 +310,21 @@ class OpenCLThreadEntry {
   // get the global workspace
   static OpenCLThreadEntry* ThreadLocal();
 };
+
+/*! \brief OpenCL runtime buffer structure with tracked memory layout */
+struct OpenCLBuffer {
+  enum class MemoryLayout {
+    kGlobalRowMajor,
+    kTexture2DActivation,
+    kTexture2DWeight,
+    kUndefined,
+  };
+  OpenCLBuffer() = default;
+  OpenCLBuffer(Optional<String> scope) : layout(MemoryLayoutFromScope(scope)) {}
+  static MemoryLayout MemoryLayoutFromScope(Optional<String> mem_scope);
+  cl_mem buffer{nullptr};
+  MemoryLayout layout{MemoryLayout::kGlobalRowMajor};
+};
 }  // namespace cl
 
 // Module to support thread-safe multi-device execution.
@@ -344,13 +361,6 @@ class OpenCLModuleNode : public ModuleNode {
   // install a new kernel to thread local entry
   cl_kernel InstallKernel(cl::OpenCLWorkspace* w, cl::OpenCLThreadEntry* t,
                           const std::string& func_name, const KTRefEntry& e);
-
-  /*
-   * \brief Splits the provided serialized source file into separate
-   * source for each kernel primitive.
-   * \param source The serialized program source file (fmt: cl)
-   */
-  std::unordered_map<std::string, std::string> SplitKernels(std::string source) const;
 
  private:
   // The workspace, need to keep reference to use it in destructor.

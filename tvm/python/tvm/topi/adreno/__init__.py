@@ -18,3 +18,4 @@
 # pylint: disable=redefined-builtin, wildcard-import
 """Qualcomm Adreno GPU specific declaration and schedules."""
 from .conv2d import *
+from .pooling import *

@@ -83,3 +83,11 @@ def conv2d_strategy_adreno(attrs, inputs, out_type, target):
         raise RuntimeError("General group convolution is not currently supported")
     return strategy
 
+@schedule_pool.register("adreno")
+def schedule_pool_adreno(attrs, outs, target):
+    """schedule pooling ops for adreno"""
+    with target:
+        if attrs.layout == "NCHW4c":
+            return topi.adreno.schedule_pool(outs, attrs.layout)
+        else:
+            return topi.cuda.schedule_pool(outs, attrs.layout)
