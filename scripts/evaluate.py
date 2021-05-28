@@ -1105,7 +1105,7 @@ class Executor(object):
             m = graph_runtime.create(graph, rlib, ctx)
         else:
             print("Using local runtime")
-            ctx = tvm.context(target, 0)
+            ctx = tvm.device(target, 0)
             m = graph_runtime.create(graph, lib, ctx)
 
         m.set_input(**params)
