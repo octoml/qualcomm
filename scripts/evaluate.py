@@ -1124,13 +1124,14 @@ class Executor(object):
 
         print("Evaluating...", flush=True)
 
+        #num_iter = 1
         #print("change number of iter before benchmarking")
-
+        num_iter = 100
         if args.debug:
             m.run()
-            time_f = m.module.time_evaluator("run", ctx, number=100)
+            time_f = m.module.time_evaluator("run", ctx, number=num_iter)
         else:
-            time_f = m.module.time_evaluator("run", ctx, number=1000)
+            time_f = m.module.time_evaluator("run", ctx, number=num_iter*10)
         cost = time_f().mean
         print("%g secs/iteration\n" % cost)
 
