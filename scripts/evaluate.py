@@ -63,6 +63,26 @@ class ModelImporter(object):
         mod = relay.quantize.prerequisite_optimize(mod, params)
         return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, preproc="mxnet"))
 
+    def import_resnet50_v2(self, target="llvm", dtype="float32"):
+        model, input_shape = gluon_model("resnet50_v2", batch_size=1)
+        shape_dict = {"data": input_shape}
+        mod, params = relay.frontend.from_mxnet(model, shape_dict)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        # layout transformation
+        if "adreno" in target:
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
+        # downcast to float16
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, preproc="mxnet"))
+
     def import_mobilenetv1(self, target="llvm", dtype="float32"):
         model, input_shape = gluon_model("mobilenet1.0", batch_size=1)
         shape_dict = {"data": input_shape}
@@ -124,21 +144,31 @@ class ModelImporter(object):
         return (mod, params, input_shape, dtype, target)
 
     def import_deeplabv3(self, target="llvm", dtype="float32"):
-        import onnx
+        import tensorflow as tf
+        try:
+            tf_compat_v1 = tf.compat.v1
+        except ImportError:
+            tf_compat_v1 = tf
+        # Tensorflow utility functions
+        import tvm.relay.testing.tf as tf_testing
 
-        graph_file = os.path.abspath(
+        model_path = os.path.abspath(
             os.path.dirname(os.path.realpath(__file__))
-            + "/../models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx"
+            + "/../models/mace_deeplabv3/deeplab-v3-plus-mobilenet-v2.pb"
         )
-        model = onnx.load_model(graph_file)
-        input_shape = {"ImageTensor:0": (1, 224, 224, 3)}
-        input_names, shape_dict = get_input_data_shape_dict(
-            model, input_shape["ImageTensor:0"]
-        )
-        mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11, freeze_params=True)
+
+        with tf_compat_v1.gfile.GFile(model_path, "rb") as f:
+            graph_def = tf_compat_v1.GraphDef()
+            graph_def.ParseFromString(f.read())
+            #graph = tf.import_graph_def(graph_def, name="")
+            # Call the utility to import the graph definition into default graph.
+            graph_def = tf_testing.ProcessGraphDefParam(graph_def)
+
+        input_shape = {"sub_7": (1, 513, 513, 3)}
+        mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape)
 
         from tvm.relay import transform
-        mod = transform.DynamicToStatic()(mod)
+        #mod = transform.DynamicToStatic()(mod)
         mod = relay.quantize.prerequisite_optimize(mod, params)
 
         if dtype == "float16":
@@ -147,10 +177,13 @@ class ModelImporter(object):
 
         # layout transformation
         if "adreno" in target:
-            layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0, 54])
             desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
             with layout_config:
-                seq = tvm.transform.Sequential([relay.transform.SimplifyExpr(), relay.transform.ConvertLayout(desired_layouts)])
+                seq = tvm.transform.Sequential([
+                    relay.transform.SimplifyExpr(),
+                    relay.transform.ConvertLayout(desired_layouts)
+                    ])
                 with tvm.transform.PassContext(opt_level=3):
                     mod = seq(mod)
             mod = relay.quantize.prerequisite_optimize(mod, params)
@@ -196,6 +229,83 @@ class ModelImporter(object):
 
         #return (mod, params, shape_dict, dtype, target)
         return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, "NHWC", preproc="keras"))
+
+
+    def import_yolov3(self, target="llvm", dtype="float32"):
+        model_url = "http://cnbj1.fds.api.xiaomi.com/mace/miai-models/yolo-v3/yolo-v3.pb"
+        model_path = os.path.abspath(
+            os.path.dirname(os.path.realpath(__file__))
+            + "/../models/mace_yolov3/yolo-v3.pb"
+        )
+
+        from tvm.contrib import download
+        download.download(model_url, model_path)
+
+        import tensorflow as tf
+        try:
+            tf_compat_v1 = tf.compat.v1
+        except ImportError:
+            tf_compat_v1 = tf
+        # Tensorflow utility functions
+        import tvm.relay.testing.tf as tf_testing
+
+        with tf_compat_v1.gfile.GFile(model_path, "rb") as f:
+            graph_def = tf_compat_v1.GraphDef()
+            graph_def.ParseFromString(f.read())
+            #graph = tf.import_graph_def(graph_def, name="")
+            # Call the utility to import the graph definition into default graph.
+            graph_def = tf_testing.ProcessGraphDefParam(graph_def)
+
+        input_shape = {"input_1": (1, 416, 416, 3)}
+        mod, params = relay.frontend.from_tensorflow(graph_def, shape=input_shape,
+                                        outputs=["conv2d_59/BiasAdd","conv2d_67/BiasAdd","conv2d_75/BiasAdd"])
+
+        from tvm.relay import transform
+        #mod = transform.DynamicToStatic()(mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+            mod = relay.quantize.prerequisite_optimize(mod, params)
+        
+        # layout transformation
+        if "adreno" in target:
+            #layout_config = relay.transform.LayoutConfig(skip_layers=[0,58,66,74])
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0,58,66,74])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([
+                    relay.transform.SimplifyExpr(),
+                    relay.transform.ConvertLayout(desired_layouts)
+                    ])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
+            mod = relay.quantize.prerequisite_optimize(mod, params)
+        #print(mod)
+        return (mod, params, input_shape, dtype, target)
+
+    def import_yolov3_mxnet(self, target="llvm", dtype="float32"):
+        model, input_shape = gluoncv_model("yolo3_darknet53_voc", batch_size=1)
+        shape_dict = {"data": input_shape}
+        mod, params = relay.frontend.from_mxnet(model, shape_dict)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        # layout transformation
+        if "adreno" in target:
+            skip_layers=[0,58,66,74]
+            layout_config = relay.transform.LayoutConfig(skip_layers=skip_layers)
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
+            mod = relay.quantize.prerequisite_optimize(mod, params)
+        # downcast to float16
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+        print(mod)
+        return (mod, params, shape_dict, dtype, target, VOCValidator(shape_dict, preproc="gluoncv"))
 
     def import_depthwise_conv2d(self, target="llvm", dtype="float32"):
         input_shape = (1, 16, 112, 112, 4)
@@ -772,12 +882,12 @@ def get_args():
         "log_filename": args.log,
         "early_stopping": None,
         "measure_option": autotvm.measure_option(
-            builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=15),
+            builder=autotvm.LocalBuilder(build_func=ndk.create_shared, timeout=15, n_parallel=2),
             runner=autotvm.RPCRunner(
                 args.rpc_key,
                 host=args.rpc_tracker_host,
                 port=args.rpc_tracker_port,
-                number=100,
+                number=50,
                 timeout=15,
                 #min_repeat_ms=150,
                 #cooldown_interval=150
@@ -920,14 +1030,23 @@ def get_input_data_shape_dict(graph_def, input_shape):
 def gluon_model(name, batch_size=None):
     import mxnet.gluon as gluon
 
-    model = gluon.model_zoo.vision.get_model(name, pretrained=True)
-    if "resnet50_v1" or "mobilenet1.0" in name:
+    if "resnet50_v1" in name or "mobilenet1.0" in name or "resnet50_v2" in name or "vgg16" in name:
+        model = gluon.model_zoo.vision.get_model(name, pretrained=True)
         data_shape = (batch_size, 3, 224, 224)
-    elif "inception" in name:
+    elif "inceptionv3" in name:
+        model = gluon.model_zoo.vision.inception_v3(pretrained=True)
         data_shape = (batch_size, 3, 299, 299)
     else:
         raise ValueError("Input shape unknown for gluon model: " + name)
 
+    return model, data_shape
+
+
+def gluoncv_model(name, batch_size=None):
+    from gluoncv import model_zoo
+    if "yolo3" in name:
+        model = model_zoo.get_model(name, pretrained=True)
+        data_shape = (batch_size, 3, 416, 416)
     return model, data_shape
 
 class Validator(object):
@@ -982,7 +1101,7 @@ class ImageNetValidator(Validator):
             image = image[np.newaxis, :]
         elif "keras" in preproc:
             image = np.array(image)[np.newaxis, :].astype("float32")
-            from keras.applications.resnet50 import preprocess_input
+            from tensorflow.keras.applications.inception_v3 import preprocess_input
             image = preprocess_input(image)
 
         self.inputs = {name : image}
@@ -1012,6 +1131,60 @@ class ImageNetValidator(Validator):
         assert ImageNetClassifier, "Failed ImageNet classifier validation check"
 
 
+class VOCValidator(Validator):
+    # this function is from yolo3.utils.letterbox_image
+    def letterbox_image(self, image, size):
+        '''resize image with unchanged aspect ratio using padding'''
+        iw, ih = image.size
+        w, h = size
+        scale = min(w/iw, h/ih)
+        nw = int(iw*scale)
+        nh = int(ih*scale)
+        
+        from PIL import Image
+        image = image.resize((nw,nh), Image.BICUBIC)
+        new_image = Image.new('RGB', size, (128,128,128))
+        new_image.paste(image, ((w-nw)//2, (h-nh)//2))
+        return new_image
+
+    def preprocess(self, img):
+        model_image_size = (416, 416)
+        boxed_image = self.letterbox_image(img, tuple(reversed(model_image_size)))
+        image_data = np.array(boxed_image, dtype='float32')
+        image_data /= 255.
+        image_data = np.transpose(image_data, [2, 0, 1])
+        image_data = np.expand_dims(image_data, 0)
+        return image_data
+
+    def __init__(self, shape_dict, layout="NCHW", preproc=None):
+        assert layout in ("NCHW", "NHWC"), "Requested layout is not currently supported: " + layout
+        assert len(shape_dict) == 1
+        from PIL import Image
+        from tvm.contrib import download
+        from os.path import join, isfile
+        from matplotlib import pyplot as plt
+
+        name = list(shape_dict.keys())[0]
+
+        # Download test image
+        image_url = "https://raw.githubusercontent.com/zhreshold/mxnet-ssd/master/data/demo/dog.jpg"
+        image_fn = "dog.png"
+        download.download(image_url, image_fn)
+
+        # Prepare test image for inference
+        #import ipdb; ipdb.set_trace()
+        image = Image.open(image_fn)
+        image_data = self.preprocess(image)
+
+        self.inputs = {name : image_data}
+
+    def Validate(self, m, ref_outputs=[]):
+        # class_IDs, scores, bounding_boxs
+        classid = m.get_output(0)
+        scores = m.get_output(1)
+        bounding_boxs = m.get_output(2)
+        for a in classid:
+            print(a)
 
 class Executor(object):
     def __init__(self, use_tracker=False):
@@ -1081,12 +1254,15 @@ class Executor(object):
             self._connect_tracker()
 
         with relay.build_config(opt_level=3):
-            print("Relay model to compile:\n")
-            print(tvm_mod)
+            # print("Relay model to compile:\n")
+            # print(tvm_mod)
             graph, lib, params = relay.build(
                 tvm_mod, target_host=target_host, target=target, params=params
             )
-            print("JSON:\n", graph)
+            #lib2 = relay.build(tvm_mod, target=target, target_host=target_host, params=params)
+            #lib2.export_library("_model.so", ndk.create_shared)
+
+            # print("JSON:\n", graph)
 
         if self.remote:
             print("Using Android OpenCL runtime over RPC")
@@ -1099,9 +1275,9 @@ class Executor(object):
                 ctx = self.remote.cpu(0)
             lib.export_library(dso_binary_path, ndk.create_shared)
             remote_path = "/data/local/tmp/" + dso_binary
-            self.remote.upload(dso_binary_path, target=remote_path)
+            self.remote.upload(dso_binary_path)
             print("Uploading binary...")
-            rlib = self.remote.load_module(remote_path)
+            rlib = self.remote.load_module(dso_binary)
             m = graph_runtime.create(graph, rlib, ctx)
         else:
             print("Using local runtime")
@@ -1174,6 +1350,7 @@ class Executor(object):
 
             def tuned_benchmark():
                 print("Apply best performing tuning profiles:")
+
                 with autotvm.apply_history_best(options["log_filename"]):
                     bench()
 
@@ -1187,17 +1364,17 @@ class Executor(object):
         tasks,
         measure_option,
         tuner="xgb",
-        n_trial=1024,
+        n_trial=333,
         early_stopping=None,
         log_filename="tuning.log",
-        use_transfer_learning=True,
+        use_transfer_learning=False,
     ):
         from tvm.autotvm.tuner import XGBTuner
         from tvm.autotvm.tuner import GATuner
 
         tmp_log_file = log_filename + ".tmp"
-        if os.path.exists(tmp_log_file) and use_transfer_learning == False:
-            os.remove(tmp_log_file)
+        #if os.path.exists(tmp_log_file) and use_transfer_learning == False:
+        #    os.remove(tmp_log_file)
 
         for i, tsk in enumerate(reversed(tasks)):
             print("Task: ", tsk)
@@ -1231,7 +1408,7 @@ class Executor(object):
             )
 
         autotvm.record.pick_best(tmp_log_file, log_filename)
-        os.remove(tmp_log_file)
+        # os.remove(tmp_log_file)
 
 if __name__ == "__main__":
     main()
