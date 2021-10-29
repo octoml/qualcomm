@@ -206,7 +206,9 @@ endif()
 if(BUILD_FOR_ANDROID)
   # EmuTLS on Android is in libgcc. Without it linked in, libtvm_runtime.so
   # won't load on Android due to missing __emutls_XXX symbols.
-  list(APPEND TVM_RUNTIME_LINKER_LIBS "gcc")
+  if(${ANDROID_NDK_MAJOR} VERSION_LESS "23")
+    list(APPEND TVM_RUNTIME_LINKER_LIBS "gcc")
+  endif()
 endif()
 
 # add source group
