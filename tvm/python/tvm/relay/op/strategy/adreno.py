@@ -140,3 +140,16 @@ def schedule_pool_adreno(attrs, outs, target):
             return topi.adreno.schedule_pool(outs, attrs.layout)
         else:
             return topi.cuda.schedule_pool(outs, attrs.layout)
+
+@schedule_concatenate.register("adreno")
+def schedule_concatenate_adreno(attrs, outs, target):
+    with target:
+        return topi.adreno.schedule_concatenate(outs)
+
+#@schedule_injective.register("adreno")
+#def schedule_injective_adreno(attrs, outs, target):
+#    with target:
+#        if attrs.src_layout == "NCHW4c" or attrs.dst_layout == "NCHW4c":
+#            return topi.adreno.schedule_injective(outs)
+#        else:
+#            return topi.cuda.schedule_injective(outs)
