@@ -372,6 +372,7 @@ void CodeGenOpenCL::VisitExpr_(const CallNode* op, std::ostream& os) {
     this->PrintExpr(op->args[3], os);
     os << ")";
   } else if (op->op.same_as(builtin::texture2d_load())) {
+    lowering_texture2d_load_ = true;
     std::stringstream ss;
     if (op->dtype.is_float16()) {
       ss << "read_imageh(";
@@ -408,6 +409,7 @@ void CodeGenOpenCL::VisitExpr_(const CallNode* op, std::ostream& os) {
     } else {
       os << ss.str();
     }
+    lowering_texture2d_load_ = false;
   } else if (op->op.same_as(builtin_call_extern_)) {
     auto func = Downcast<StringImm>(op->args[0]);
     // Enable atomics extension if used.
@@ -415,6 +417,18 @@ void CodeGenOpenCL::VisitExpr_(const CallNode* op, std::ostream& os) {
       enable_atomics_ = true;
     }
     CodeGenC::VisitExpr_(op, os);
+  } else if (op->op.same_as(builtin::if_then_else())) {
+    if (lowering_texture2d_load_) {
+      os << "select(";
+      PrintExpr(op->args[2], os);
+      os << ", ";
+      PrintExpr(op->args[1], os);
+      os << ", ";
+      PrintExpr(op->args[0], os);
+      os << ")";
+    } else {
+      CodeGenC::VisitExpr_(op, os);
+    }
   } else {
     CodeGenC::VisitExpr_(op, os);
   }
