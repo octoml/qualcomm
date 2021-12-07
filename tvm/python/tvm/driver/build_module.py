@@ -176,6 +176,7 @@ def lower(sch, args, name="main", binds=None, simple_mode=False):
     pass_list += [
         tvm.tir.transform.InjectPrefetch(),
         tvm.tir.transform.TextureFlatten(),
+        tvm.tir.transform.RewriteTextureConditionals(),
         tvm.tir.transform.StorageFlatten(64, instrument_bound_checkers),
         tvm.tir.transform.BF16Legalize(),
         tvm.tir.transform.NarrowDataType(32),
