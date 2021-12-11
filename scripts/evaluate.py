@@ -211,15 +211,15 @@ class ModelImporter(object):
 
         # layout transformation
         if "adreno" in target:
-            layout_config = relay.transform.LayoutConfig(skip_layers=[0, 54])
-            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
-            with layout_config:
-                seq = tvm.transform.Sequential([
-                    relay.transform.SimplifyExpr(),
-                    relay.transform.ConvertLayout(desired_layouts)
-                    ])
-                with tvm.transform.PassContext(opt_level=3):
-                    mod = seq(mod)
+            #layout_config = relay.transform.LayoutConfig(skip_layers=[0, 54])
+            #desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            #with layout_config:
+            seq = tvm.transform.Sequential([
+                relay.transform.SimplifyExpr(),
+                #krelay.transform.ConvertLayout(desired_layouts)
+                ])
+            with tvm.transform.PassContext(opt_level=3):
+                mod = seq(mod)
             mod = relay.quantize.prerequisite_optimize(mod, params)
         return (mod, params, input_shape, dtype, target)
 
@@ -373,6 +373,48 @@ class ModelImporter(object):
 
         return (mod, params, {"data": input_shape}, dtype, target, validator)
 
+    def import_conv2d_deeplab_1_nchwc(self, target="llvm", dtype="float32"):
+        #input_shape, filter_shape = (1, 8, 257, 257, 4), (4, 32, 1, 1, 4)
+        #bias_shape = (1, 4, 1, 1, 4)
+        #input_shape, filter_shape = (1, 80, 65, 65, 4), (64, 320, 1, 1, 4)
+        #bias_shape = (1, 64, 1, 1, 4)
+        input_shape, filter_shape = (1, 36, 129, 129, 4), (6, 144, 1, 1, 4)
+        bias_shape = (1, 6, 1, 1, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        bias = relay.var("bias", shape=bias_shape, dtype=dtype)
+        conv = relay.nn.conv2d(A, B, data_layout="NCHW4c", kernel_layout="OIHW4o", 
+                padding=[0,0,0,0],strides=[1,1],
+                out_dtype=dtype)
+        D = relay.op.add(conv, bias)
+        D = relay.op.nn.relu(D)
+
+        mod = relay.Function([A, B, bias], D)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        bias_data = np.zeros(bias_shape).astype(dtype)
+        initializer("weight", filter_data)
+        initializer("bias", bias_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+            "bias" : tvm.nd.array(bias_data),
+        }
+
+        def validator(inputs):
+            vec_length = input_shape[-1]
+            # nchwc -> nchw
+            data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            data = data.astype("float32")
+            # kcrsk -> kcrs
+            w_np = params["weight"].asnumpy()
+            kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
+            np_result = testing.conv2d_nchw_python(data, kernel, padding=[1,1,1,1], stride=[1,1])
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+            return [np_result,]
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
+
     def import_conv2d_resnet50_v2_nchwc_3c(self, target="llvm", dtype="float32"):
         input_shape, filter_shape = (1, 1, 224, 224, 4), (16, 4, 7, 7, 4)
         bias_shape = (1, 16, 1, 1, 4)
@@ -494,6 +536,98 @@ class ModelImporter(object):
             "weight": tvm.nd.array(filter_data),
             "bias" : tvm.nd.array(bias_data),
         }
+
+        return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_conv2d_nhwc(self, target="llvm", dtype="float32"):
+        #input_shape = (1, 257, 257, 32)
+        #filter_shape = (1, 1, 32, 16)
+        #input_shape = (1, 65, 65, 320)
+        #filter_shape = (1, 1, 320, 256)
+        input_shape = (1, 129, 129, 144)
+        filter_shape = (1, 1, 144, 24)
+        add_shape = (filter_shape[-1],)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        C = relay.var("add", shape=add_shape, dtype=dtype)
+        D = relay.nn.conv2d(A, B, data_layout="NHWC", kernel_layout="HWIO", out_dtype=dtype, channels=filter_shape[-1], kernel_size=(1,1))
+        D = relay.add(D, C)
+        mod = relay.Function([A, B, C], D)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        add_data = np.zeros(add_shape).astype(dtype)
+        initializer("weight", filter_data)
+        initializer("bias", add_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+            "add": tvm.nd.array(add_data),
+        }
+
+        mod = tvm.IRModule.from_expr(mod)
+
+        return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_depthwise_conv2d_nchwc(self, target="llvm", dtype="float32"):
+        #input_shape = (1, 8, 257, 257, 4)
+        #filter_shape = (8, 1, 3, 3, 4)
+        #input_shape = (1, 36, 129, 129, 4)
+        #filter_shape = (36, 1, 3, 3, 4)
+        input_shape = (4, 144, 35, 35, 4)
+        filter_shape = (144, 1, 3, 3, 4)
+        kernel_size = (filter_shape[2], filter_shape[3])
+        add_shape = (1, filter_shape[0], 1, 1, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        C = relay.var("add", shape=add_shape, dtype=dtype)
+        channels = filter_shape[0] * filter_shape[4]
+        D = relay.nn.conv2d(A, B, data_layout="NCHW4c", kernel_layout="OIHW4o", out_dtype=dtype, groups=channels, channels=channels, kernel_size=kernel_size, padding=(1, 1))
+        D = relay.add(D, C)
+        mod = relay.Function([A, B, C], D)
+        # mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        add_data = np.zeros(add_shape).astype(dtype)
+        initializer("weight", filter_data)
+        initializer("bias", add_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+            "add": tvm.nd.array(add_data),
+        }
+
+        mod = tvm.IRModule.from_expr(mod)
+
+        return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_depthwise_conv2d_nhwc(self, target="llvm", dtype="float32"):
+        #input_shape = (1, 257, 257, 32)
+        #filter_shape = (3, 3, 32, 1)
+        #input_shape = (1, 129, 129, 144)
+        #filter_shape = (3, 3, 144, 1)
+        input_shape = (4, 35, 35, 576)
+        filter_shape = (3, 3, 576, 1)
+        kernel_size = (filter_shape[0], filter_shape[1])
+        add_shape = (filter_shape[2],)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        C = relay.var("add", shape=add_shape, dtype=dtype)
+        D = relay.nn.conv2d(A, B, data_layout="NHWC", kernel_layout="HWOI", out_dtype=dtype, groups=filter_shape[2], channels=filter_shape[2], kernel_size=kernel_size, padding=(1, 1))
+        D = relay.add(D, C)
+        mod = relay.Function([A, B, C], D)
+        # mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        add_data = np.zeros(add_shape).astype(dtype)
+        initializer("weight", filter_data)
+        initializer("bias", add_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+            "add": tvm.nd.array(add_data),
+        }
+
+        mod = tvm.IRModule.from_expr(mod)
 
         return (mod, params, {"data": input_shape}, dtype, target)
 

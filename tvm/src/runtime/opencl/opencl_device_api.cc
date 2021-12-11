@@ -56,6 +56,8 @@ OpenCLBuffer::MemoryLayout OpenCLBuffer::MemoryLayoutFromScope(Optional<String> 
     return OpenCLBuffer::MemoryLayout::kTexture2DActivation;
   } else if (mem_scope.value() == "texture:weight") {
     return OpenCLBuffer::MemoryLayout::kTexture2DWeight;
+  } else if (mem_scope.value() == "texture:nhwc") {
+    return OpenCLBuffer::MemoryLayout::kTexture2DNHWC;
   }
   LOG(FATAL) << "No memory layout defined for memory of scope: " << mem_scope.value();
   return OpenCLBuffer::MemoryLayout::kUndefined;

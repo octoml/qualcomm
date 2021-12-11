@@ -317,6 +317,7 @@ struct OpenCLBuffer {
     kGlobalRowMajor,
     kTexture2DActivation,
     kTexture2DWeight,
+    kTexture2DNHWC,
     kUndefined,
   };
   OpenCLBuffer() = default;

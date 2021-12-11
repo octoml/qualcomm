@@ -261,6 +261,8 @@ class StorageInfo : private ExprVisitor{
     if (auto attrs = call->attrs.as<Conv2DAttrs>()) {
       if (attrs->data_layout == "NCHW4c" && attrs->kernel_layout == "OIHW4o") {
         supports_texture_storage = true;
+      } else if (attrs->data_layout == "NHWC" && attrs->kernel_layout == "HWIO") {
+        supports_texture_storage = true;
       }
     } else if (auto attrs = call->attrs.as<GlobalPool2DAttrs>()) {
       if (attrs->layout == "NCHW4c") {
