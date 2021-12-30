@@ -113,7 +113,18 @@ class SimulatedAnnealingOptimizer(ModelOptimizer):
         while k < n_iter and k < k_last_modify + early_stop:
             new_points = np.empty_like(points)
             for i, p in enumerate(points):
-                new_points[i] = random_walk(p, self.dims)
+                new_point = None
+                if (self.task.config_space.filtered_indexes) and p in self.task.config_space.filtered_indexes:
+                    p = self.task.config_space.filtered_indexes[p]
+                elif (self.task.config_space.filtered_indexes) and (p not in self.task.config_space.filtered_indexes):
+                    print("Found index which should be in filtered_indexes but it is not, ", p)
+                while new_point == None:
+                    new_point = random_walk(p, self.dims)
+                    if (self.task.config_space.a2f_indexes) and (new_point not in self.task.config_space.a2f_indexes):
+                        new_point = None
+                    elif self.task.config_space.a2f_indexes:
+                        new_point = self.task.config_space.a2f_indexes[new_point]
+                new_points[i] = new_point
 
             new_scores = model.predict(new_points)
 

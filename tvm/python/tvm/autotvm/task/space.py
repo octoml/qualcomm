@@ -672,6 +672,10 @@ class ConfigSpace(object):
         self.flop = 0
         self.cost = None
         self.is_fallback = False
+        self.shared_filter = None
+        self.non_filtered_len = 0
+        self.filtered_indexes = None
+        self.a2f_indexes = None
 
     @staticmethod
     def axis(var):
@@ -822,6 +826,33 @@ class ConfigSpace(object):
         """
         return not bool(self.errors)
 
+    def multi_filter(self, **kwargs):
+        if self._collect:
+            fil = kwargs.get("filter", lambda x: True)
+            self.shared_filter = fil
+            self._length = int(np.prod([len(x) for x in self.space_map.values()]))
+            self.non_filtered_len = self._length
+            new_len = 0
+            # print(self._length)
+            self.filtered_indexes = {}
+            self.a2f_indexes = {}
+            for i in range(self._length):
+                entities = OrderedDict()
+                t = i
+                for name, space in self.space_map.items():
+                    entities[name] = space[t % len(space)]
+                    t //= len(space)
+                if fil(entities) == True:
+                    self.filtered_indexes[new_len] = i
+                    self.a2f_indexes[i] = new_len
+                    new_len += 1
+            if new_len > 0:
+                self._length = new_len
+            else:
+                self.filtered_indexes = None
+                self.a2f_indexes = None
+            # print(self._length)
+
     def _add_new_transform(self, space_class, name, axes, policy, **kwargs):
         """Add a new transform space in template"""
         if self._collect:
@@ -851,7 +882,10 @@ class ConfigSpace(object):
         if index < 0 or index >= len(self):
             raise IndexError("Index out of range: size {}, got index {}".format(len(self), index))
         entities = OrderedDict()
-        t = index
+        if self.filtered_indexes:
+            t = self.filtered_indexes[index]
+        else:
+            t = index
         for name, space in self.space_map.items():
             entities[name] = space[t % len(space)]
             t //= len(space)

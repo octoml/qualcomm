@@ -247,8 +247,11 @@ class ModelBasedTuner(Tuner):
                 while index in self.visited:
                     index = np.random.randint(len(self.space))
 
-            ret.append(self.space.get(index))
             self.visited.add(index)
+            if index >= len(self.space):
+                index = len(self.space) - 1
+                print("index is out of range ", index, len(self.space))
+            ret.append(self.space.get(index))
 
             counter += 1
         return ret
