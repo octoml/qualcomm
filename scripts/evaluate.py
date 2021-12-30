@@ -373,6 +373,166 @@ class ModelImporter(object):
 
         return (mod, params, {"data": input_shape}, dtype, target, validator)
 
+    def import_conv2d_resnet50_v2_nchwc_3c(self, target="llvm", dtype="float32"):
+        input_shape, filter_shape = (1, 1, 224, 224, 4), (16, 4, 7, 7, 4)
+        bias_shape = (1, 16, 1, 1, 4)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        bias = relay.var("bias", shape=bias_shape, dtype=dtype)
+        conv = relay.nn.conv2d(A, B, data_layout="NCHW4c", kernel_layout="OIHW4o", 
+                padding=[3,3,3,3],strides=[2,2],
+                out_dtype=dtype)
+        D = relay.op.add(conv, bias)
+        D = relay.op.nn.relu(D)
+
+        mod = relay.Function([A, B, bias], D)
+        #mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        bias_data = np.zeros(bias_shape).astype(dtype)
+        initializer("weight", filter_data)
+        initializer("bias", bias_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+            "bias" : tvm.nd.array(bias_data),
+        }
+
+        def validator(inputs):
+            vec_length = input_shape[-1]
+            # nchwc -> nchw
+            data = inputs[0].transpose((0, 1, 4, 2, 3)).reshape(inputs[0].shape[0], inputs[0].shape[1]*inputs[0].shape[-1], inputs[0].shape[2], inputs[0].shape[3])
+            data = data.astype("float32")
+            # kcrsk -> kcrs
+            w_np = params["weight"].asnumpy()
+            kernel = w_np.transpose((0, 4, 1, 2, 3)).reshape(w_np.shape[0] * w_np.shape[4], w_np.shape[1], w_np.shape[2], w_np.shape[3])
+            np_result = testing.conv2d_nchw_python(data, kernel, padding=[1,1,1,1], stride=[1,1])
+            # nkhw -> nkhwk
+            np_result = np_result.reshape(np_result.shape[0], np_result.shape[1]//vec_length, vec_length, np_result.shape[2], np_result.shape[3]).transpose(0, 1, 3, 4, 2)
+            return [np_result,]
+        return (mod, params, {"data": input_shape}, dtype, target, validator)
+        #return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_conv2d_resnet50_v2_nchw_3c(self, target="llvm", dtype="float32"):
+        input_shape = (1, 3, 224, 224)
+        filter_shape = (64, 3, 7, 7)
+        bias_shape = (1, 64, 1, 1)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        bias = relay.var("bias", shape=bias_shape, dtype=dtype)
+
+        #C = relay.nn.relu(A)
+        conv = relay.nn.conv2d(A, B, data_layout="NCHW", kernel_layout="OIHW",
+                            padding=[3,3,3,3],strides=[2,2],
+                            out_dtype=dtype, channels=64, kernel_size=(7,7))
+        D = relay.op.add(conv, bias)
+        D = relay.op.nn.relu(D)
+
+        mod = relay.Function([A, B, bias], D)
+        # mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        bias_data = np.zeros(bias_shape).astype(dtype)
+        initializer("weight", filter_data)
+        initializer("bias", bias_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+            "bias" : tvm.nd.array(bias_data),
+        }
+
+        # def validator(inputs):
+        #     vec_length = input_shape[-1]
+        #     # nchwc -> nchw
+        #     data = inputs[0]
+        #     # convert reference to float32 for use in testing api which only supports float32 activations
+        #     data = data.astype("float32")
+        #     # kcrsk -> kcrs
+        #     w_np = params["weight"].asnumpy()
+        #     kernel = w_np
+        #     np_result = testing.conv2d_nchw_python(data, kernel, 1, 0)
+        #     return [np_result,]
+
+        return (mod, params, {"data": input_shape}, dtype, target)
+
+    def import_conv2d_yolov3_v2_nchw_3c(self, target="llvm", dtype="float32"):
+        input_shape = (1, 1024, 13, 13)
+        filter_shape = (255, 1024, 1, 1)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+
+        #C = relay.nn.relu(A)
+        conv = relay.nn.conv2d(A, B, data_layout="NCHW", kernel_layout="OIHW",
+                            padding=[0,0,0,0],strides=[1,1],
+                            out_dtype=dtype, channels=255, kernel_size=(1,1))
+
+        mod = relay.Function([A, B], conv)
+        # mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        initializer("weight", filter_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+        }
+
+        # def validator(inputs):
+        #     vec_length = input_shape[-1]
+        #     # nchwc -> nchw
+        #     data = inputs[0]
+        #     # convert reference to float32 for use in testing api which only supports float32 activations
+        #     data = data.astype("float32")
+        #     # kcrsk -> kcrs
+        #     w_np = params["weight"].asnumpy()
+        #     kernel = w_np
+        #     np_result = testing.conv2d_nchw_python(data, kernel, 1, 0)
+        #     return [np_result,]
+
+        return (mod, params, {"data": input_shape}, dtype, target)
+
+
+    def import_conv2d_inceptionv3_nchw_3c(self, target="llvm", dtype="float32"):
+        input_shape = (1, 3, 299, 299)
+        filter_shape = (32, 3, 3, 3)
+        bias_shape = (1, 32, 1, 1)
+        A = relay.var("data", shape=input_shape, dtype=dtype)
+        B = relay.var("weight", shape=filter_shape, dtype=dtype)
+        bias = relay.var("bias", shape=bias_shape, dtype=dtype)
+
+        #C = relay.nn.relu(A)
+        conv = relay.nn.conv2d(A, B, data_layout="NCHW", kernel_layout="OIHW",
+                            padding=[0,0,0,0],strides=[2,2],
+                            out_dtype=dtype, channels=32, kernel_size=(3,3))
+        D = relay.op.add(conv, bias)
+        D = relay.op.nn.relu(D)
+
+        mod = relay.Function([A, B, bias], D)
+        # mod, params = relay.testing.init.create_workload(func)
+        np.random.seed(0)
+        initializer = relay.testing.init.Xavier()
+        filter_data = np.zeros(filter_shape).astype(dtype)
+        bias_data = np.zeros(bias_shape).astype(dtype)
+        initializer("weight", filter_data)
+        initializer("bias", bias_data)
+        params = {
+            "weight": tvm.nd.array(filter_data),
+            "bias" : tvm.nd.array(bias_data),
+        }
+
+        # def validator(inputs):
+        #     vec_length = input_shape[-1]
+        #     # nchwc -> nchw
+        #     data = inputs[0]
+        #     # convert reference to float32 for use in testing api which only supports float32 activations
+        #     data = data.astype("float32")
+        #     # kcrsk -> kcrs
+        #     w_np = params["weight"].asnumpy()
+        #     kernel = w_np
+        #     np_result = testing.conv2d_nchw_python(data, kernel, 1, 0)
+        #     return [np_result,]
+
+        return (mod, params, {"data": input_shape}, dtype, target)
+
     def import_conv2d_nchw(self, target="llvm", dtype="float32"):
         input_shape = (1, 128, 112, 112)
         filter_shape = (128, 128, 3, 3)
