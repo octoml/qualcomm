@@ -104,6 +104,123 @@ class ModelImporter(object):
         mod = relay.quantize.prerequisite_optimize(mod, params)
         return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, preproc="mxnet"))
 
+    def get_onnx_from_tf1(self, model_url, filename, input_names, output_names, shape_override = None):
+        tf_model_file = os.path.abspath(
+            os.path.dirname(os.path.realpath(__file__))
+            + "/../models/{}.pb".format(filename)
+        )
+
+        from tvm.contrib import download
+        download.download(model_url, tf_model_file)
+        # converted using command line:
+        # python -m tf2onnx.convert --graphdef mace_resnet-v2-50.pb --output mace_resnet-v2-50.onnx --inputs input:0[1,224,224,3] --outputs resnet_v2_50/predictions/Reshape_1:0
+        onnx_model_file = os.path.abspath(
+            os.path.dirname(os.path.realpath(__file__))
+            + "/../models/{}.onnx".format(filename))
+        if os.path.exists(onnx_model_file) == False:
+            import tf2onnx
+            import tensorflow as tf
+            try:
+                tf_compat_v1 = tf.compat.v1
+            except ImportError:
+                tf_compat_v1 = tf
+            # Tensorflow utility functions
+            import tvm.relay.testing.tf as tf_testing
+
+            with tf_compat_v1.gfile.GFile(tf_model_file, "rb") as f:
+                graph_def = tf_compat_v1.GraphDef()
+                graph_def.ParseFromString(f.read())
+                #graph = tf.import_graph_def(graph_def, name="")
+                # Call the utility to import the graph definition into default graph.
+                graph_def = tf_testing.ProcessGraphDefParam(graph_def)
+
+                model_proto, external_tensor_storage = tf2onnx.convert.from_graph_def(graph_def,
+                    name=filename, input_names=input_names, output_names=output_names,
+                    shape_override = shape_override,
+                    output_path=onnx_model_file)
+
+        return onnx_model_file
+
+    def import_mace_mobilenetv1(self, target="llvm", dtype="float32"):
+        model_url = "https://cnbj1.fds.api.xiaomi.com/mace/miai-models/mobilenet-v1/mobilenet-v1-1.0.pb"
+        filename = "mace_mobilenet-v1-1.0"
+        input_names = ["input:0"]
+        output_names = ["MobilenetV1/Predictions/Reshape_1:0"]
+        onnx_model_file = self.get_onnx_from_tf1(model_url, filename, input_names, output_names)
+        import onnx
+        model = onnx.load(onnx_model_file)
+        shape_dict = {'input:0': [1, 224, 224, 3]}
+        mod, params = relay.frontend.from_onnx(model, shape_dict, freeze_params=True)
+
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+        # layout transformation
+        if "adreno" in target:
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0, 27])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
+        # downcast to float16
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, "NHWC", preproc="keras_mobilenetv1"))
+
+    def import_mace_resnet50_v2(self, target="llvm", dtype="float32"):
+        model_url = "https://cnbj1.fds.api.xiaomi.com/mace/miai-models/resnet-v2-50/resnet-v2-50.pb"
+        filename = "mace_resnet-v2-50"
+        input_names = ["input:0"]
+        shape_override = {"input:0": [1, 224, 224, 3]}
+        output_names = ["resnet_v2_50/predictions/Reshape_1:0"]
+        onnx_model_file = self.get_onnx_from_tf1(model_url, filename, input_names, output_names, shape_override)
+        import onnx
+        model = onnx.load(onnx_model_file)
+        shape_dict = {'input:0': [1, 224, 224, 3]}
+        mod, params = relay.frontend.from_onnx(model, shape_dict, freeze_params=True)
+
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        # layout transformation
+        if "adreno" in target:
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0, 53])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
+        # downcast to float16
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, "NHWC", preproc="keras_mobilenetv1"))
+
+    def import_mace_inceptionv3(self, target="llvm", dtype="float32"):
+        model_url = "https://cnbj1.fds.api.xiaomi.com/mace/miai-models/inception-v3/inception-v3.pb"
+        filename = "mace_inception-v3"
+        input_names = ["input:0"]
+        output_names = ["InceptionV3/Predictions/Reshape_1:0"]
+        onnx_model_file = self.get_onnx_from_tf1(model_url, filename, input_names, output_names)
+        import onnx
+        model = onnx.load(onnx_model_file)
+        shape_dict = {'input:0': [1, 299, 299, 3]}
+        mod, params = relay.frontend.from_onnx(model, shape_dict, freeze_params=True)
+
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+        # layout transformation
+        if "adreno" in target:
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0, 94])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
+        # downcast to float16
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+        return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, "NHWC", preproc="keras"))
+
     def import_vgg16(self, target="llvm", dtype="float32"):
         model, input_shape = gluon_model("vgg16", batch_size=1)
         shape_dict = {"data": input_shape}
@@ -266,7 +383,7 @@ class ModelImporter(object):
         return (mod, params, shape_dict, dtype, target, ImageNetValidator(shape_dict, "NHWC", preproc="keras"))
 
 
-    def import_yolov3(self, target="llvm", dtype="float32"):
+    def import_mace_yolov3(self, target="llvm", dtype="float32"):
         model_url = "http://cnbj1.fds.api.xiaomi.com/mace/miai-models/yolo-v3/yolo-v3.pb"
         model_path = os.path.abspath(
             os.path.dirname(os.path.realpath(__file__))
@@ -1383,6 +1500,10 @@ class ImageNetValidator(Validator):
         elif "keras" in preproc:
             image = np.array(image)[np.newaxis, :].astype("float32")
             from tensorflow.keras.applications.inception_v3 import preprocess_input
+            image = preprocess_input(image)
+        elif "keras_mobilenetv1" in preproc:
+            image = np.array(image)[np.newaxis, :].astype("float32")
+            from tensorflow.keras.applications.mobilenet import preprocess_input
             image = preprocess_input(image)
 
         self.inputs = {name : image}
