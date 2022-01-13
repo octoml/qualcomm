@@ -144,6 +144,40 @@ class ModelImporter(object):
         return (mod, params, input_shape, dtype, target)
 
     def import_deeplabv3(self, target="llvm", dtype="float32"):
+        import onnx
+
+        graph_file = os.path.abspath(
+            os.path.dirname(os.path.realpath(__file__))
+            + "/../models/deeplabv3_mnv2_pascal_train_aug/deeplabv3_mnv2.onnx"
+        )
+        model = onnx.load_model(graph_file)
+        input_shape = {"ImageTensor:0": (1, 224, 224, 3)}
+        input_names, shape_dict = get_input_data_shape_dict(
+            model, input_shape["ImageTensor:0"]
+        )
+        mod, params = relay.frontend.from_onnx(model, shape_dict, opset=11, freeze_params=True)
+
+        from tvm.relay import transform
+        mod = transform.DynamicToStatic()(mod)
+        mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        if dtype == "float16":
+            mod = downcast_fp16(mod["main"], mod)
+            mod = relay.quantize.prerequisite_optimize(mod, params)
+
+        # layout transformation
+        if "adreno" in target:
+            layout_config = relay.transform.LayoutConfig(skip_layers=[0])
+            desired_layouts = {"nn.conv2d": ["NCHW4c", "OIHW4o"]}
+            with layout_config:
+                seq = tvm.transform.Sequential([relay.transform.SimplifyExpr(), relay.transform.ConvertLayout(desired_layouts)])
+                with tvm.transform.PassContext(opt_level=3):
+                    mod = seq(mod)
+            mod = relay.quantize.prerequisite_optimize(mod, params)
+        return (mod, params, input_shape, dtype, target)
+
+
+    def import_mace_deeplabv3(self, target="llvm", dtype="float32"):
         import tensorflow as tf
         try:
             tf_compat_v1 = tf.compat.v1
@@ -188,6 +222,7 @@ class ModelImporter(object):
                     mod = seq(mod)
             mod = relay.quantize.prerequisite_optimize(mod, params)
         return (mod, params, input_shape, dtype, target)
+
 
     def import_inceptionv3(self, target="llvm", dtype="float32"):
         import onnx
