@@ -42,6 +42,7 @@
 #include "../src/runtime/dso_library.cc"
 #include "../src/runtime/file_utils.cc"
 #include "../src/runtime/graph/graph_runtime.cc"
+#include "../src/runtime/graph/debug/graph_runtime_debug.cc"
 #include "../src/runtime/graph/graph_runtime_factory.cc"
 #include "../src/runtime/library_module.cc"
 #include "../src/runtime/module.cc"
@@ -65,6 +66,7 @@
 #ifdef TVM_OPENCL_RUNTIME
 #include "../src/runtime/opencl/opencl_device_api.cc"
 #include "../src/runtime/opencl/opencl_module.cc"
+#include "../src/runtime/opencl/texture_pool.cc"
 #include "../src/runtime/source_utils.cc"
 #endif
 
