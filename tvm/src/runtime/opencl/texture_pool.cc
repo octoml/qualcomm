@@ -55,7 +55,7 @@ class TexturePool::Pool {
         int64_t wasted_size = new_size - req_size;
         // Minimize added size first and wasted size thereafter
         if ((min_added_size > 0 && added_size < min_added_size) ||
-            (min_added_size == 0 && wasted_size < min_wasted_size)) {
+             (min_added_size == added_size && wasted_size < min_wasted_size)) {
           min_added_size = added_size;
           min_wasted_size = wasted_size;
           best_mem = it;
