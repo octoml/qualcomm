@@ -42,6 +42,12 @@ def conv2d_strategy_adreno(attrs, inputs, out_type, target):
                 wrap_topi_schedule(topi.cuda.schedule_conv2d_nchw),
                 name="conv2d_nchw.cuda",
             )
+        elif data_layout == "NHWC" and kernel_layout == "HWIO":
+            strategy.add_implementation(
+                wrap_compute_conv2d(topi.cuda.conv2d_nhwc),
+                wrap_topi_schedule(topi.cuda.schedule_conv2d_nhwc),
+                name="conv2d_nhwc.cuda",
+            )
         elif data_layout == "NCHW4c" and kernel_layout == "OIHW4o":
             strategy.add_implementation(
                 wrap_compute_conv2d(topi.adreno.conv2d_nchwc),
@@ -63,6 +69,12 @@ def conv2d_strategy_adreno(attrs, inputs, out_type, target):
                 wrap_compute_conv2d(topi.cuda.depthwise_conv2d_nchw),
                 wrap_topi_schedule(topi.cuda.schedule_depthwise_conv2d_nchw),
                 name="depthwise_conv2d_nchw.cuda",
+            )
+        elif data_layout == "NHWC" and kernel_layout == "HWIO":
+            strategy.add_implementation(
+                wrap_compute_conv2d(topi.nn.depthwise_conv2d_nhwc),
+                wrap_topi_schedule(topi.cuda.schedule_depthwise_conv2d_nhwc),
+                name="depthwise_conv2d_nhwc.cuda",
             )
         elif data_layout == "NCHW4c" and kernel_layout == "OIHW4o":
             strategy.add_implementation(
