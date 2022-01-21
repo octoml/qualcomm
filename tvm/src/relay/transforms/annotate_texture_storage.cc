@@ -151,7 +151,7 @@ class StorageInfo : private ExprVisitor{
 
       bool expr_is_rgba_vectorizable = false;
       if (const auto* ttype = expr->checked_type().as<TensorTypeNode>()) {
-        if (ttype->shape.size() > 0) {
+        if (ttype->shape.size() == 5) {
           auto inner_dim = ttype->shape.back().as<IntImmNode>();
           if (inner_dim && inner_dim->value == 4) {
             expr_is_rgba_vectorizable = true;
