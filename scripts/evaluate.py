@@ -441,18 +441,6 @@ class ModelImporter(object):
             "bias" : tvm.nd.array(bias_data),
         }
 
-        # def validator(inputs):
-        #     vec_length = input_shape[-1]
-        #     # nchwc -> nchw
-        #     data = inputs[0]
-        #     # convert reference to float32 for use in testing api which only supports float32 activations
-        #     data = data.astype("float32")
-        #     # kcrsk -> kcrs
-        #     w_np = params["weight"].asnumpy()
-        #     kernel = w_np
-        #     np_result = testing.conv2d_nchw_python(data, kernel, 1, 0)
-        #     return [np_result,]
-
         return (mod, params, {"data": input_shape}, dtype, target)
 
     def import_conv2d_yolov3_v2_nchw_3c(self, target="llvm", dtype="float32"):
@@ -475,18 +463,6 @@ class ModelImporter(object):
         params = {
             "weight": tvm.nd.array(filter_data),
         }
-
-        # def validator(inputs):
-        #     vec_length = input_shape[-1]
-        #     # nchwc -> nchw
-        #     data = inputs[0]
-        #     # convert reference to float32 for use in testing api which only supports float32 activations
-        #     data = data.astype("float32")
-        #     # kcrsk -> kcrs
-        #     w_np = params["weight"].asnumpy()
-        #     kernel = w_np
-        #     np_result = testing.conv2d_nchw_python(data, kernel, 1, 0)
-        #     return [np_result,]
 
         return (mod, params, {"data": input_shape}, dtype, target)
 
@@ -519,18 +495,6 @@ class ModelImporter(object):
             "bias" : tvm.nd.array(bias_data),
         }
 
-        # def validator(inputs):
-        #     vec_length = input_shape[-1]
-        #     # nchwc -> nchw
-        #     data = inputs[0]
-        #     # convert reference to float32 for use in testing api which only supports float32 activations
-        #     data = data.astype("float32")
-        #     # kcrsk -> kcrs
-        #     w_np = params["weight"].asnumpy()
-        #     kernel = w_np
-        #     np_result = testing.conv2d_nchw_python(data, kernel, 1, 0)
-        #     return [np_result,]
-
         return (mod, params, {"data": input_shape}, dtype, target)
 
     def import_conv2d_nchw(self, target="llvm", dtype="float32"):
@@ -549,18 +513,6 @@ class ModelImporter(object):
         params = {
             "weight": tvm.nd.array(filter_data),
         }
-
-        # def validator(inputs):
-        #     vec_length = input_shape[-1]
-        #     # nchwc -> nchw
-        #     data = inputs[0]
-        #     # convert reference to float32 for use in testing api which only supports float32 activations
-        #     data = data.astype("float32")
-        #     # kcrsk -> kcrs
-        #     w_np = params["weight"].asnumpy()
-        #     kernel = w_np
-        #     np_result = testing.conv2d_nchw_python(data, kernel, 1, 0)
-        #     return [np_result,]
 
         return (mod, params, {"data": input_shape}, dtype, target)
 
