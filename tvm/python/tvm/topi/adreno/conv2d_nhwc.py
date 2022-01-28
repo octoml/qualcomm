@@ -24,6 +24,9 @@ from tvm.topi import nn
 from tvm.topi.utils import simplify
 from ..utils import get_const_tuple, traverse_inline
 
+# OpenCL spec declares minimal value of max width/height dimension for 2D image.
+# See CL_DEVICE_IMAGE2D_MAX_WIDTH in https://www.khronos.org/registry/OpenCL/sdk/2.2/docs/man/html/clGetDeviceInfo.html
+OCL_IMAGE2D_MIN_SIZE = 16384
 
 @autotvm.register_topi_compute("conv2d_nhwc.image2d")
 def conv2d_nhwc(cfg, data, kernel, strides, padding, dilation, out_dtype="float16"):
@@ -218,10 +221,9 @@ def schedule_conv2d_NHWC(cfg, s, output, args={}):
 
     # create cache stage
     def get_texture_storage(shape):
-        limit = 16384
-        if shape[0] * shape[1] * shape[2] < limit and shape[3] < limit:
+        if shape[0] * shape[1] * shape[2] < OCL_IMAGE2D_MIN_SIZE and shape[3] < OCL_IMAGE2D_MIN_SIZE:
             return "texture"
-        elif shape[0] * shape[1] < limit and shape[2] * shape[3] < limit:
+        elif shape[0] * shape[1] < OCL_IMAGE2D_MIN_SIZE and shape[2] * shape[3] < OCL_IMAGE2D_MIN_SIZE:
             return "texture:nhwc"
         else:
             return "texture:weight"
