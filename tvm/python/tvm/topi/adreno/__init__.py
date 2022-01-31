@@ -19,4 +19,6 @@
 """Qualcomm Adreno GPU specific declaration and schedules."""
 from .conv2d import *
 from .conv2d_tpack import *
+from .conv2d_nhwc import *
+from .depthwise_conv2d_nhwc import *
 from .pooling import *

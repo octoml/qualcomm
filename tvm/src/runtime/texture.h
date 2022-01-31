@@ -50,11 +50,15 @@ inline size_t DefaultTextureLayoutSeparator(size_t shape_rank, std::string conve
   // e.g. [N,C,H,W,c] -> Texture2d[N*C*H, W, c]
   // Texture weight:
   // e.g. [O,I,H,W,c] -> Texture2d[O, I*H*W, c]
+  // Texture nhwc:
+  // e.g. [N,H,W,C] -> Texture2d[N*H, W*C, c]
   size_t separator = 0;
   if (convention == "texture"){
     separator = shape_rank - 2;
   } else if (convention == "texture:weight") {
     separator = 1;
+  } else if (convention == "texture:nhwc") {
+    separator = 2;
   } else {
     LOG(FATAL) << "Encountered unknown texture lowering convention";
   }
