@@ -11,19 +11,28 @@ For testing texture memory support, please use the tvm repository included as a 
 Questions of issues using the scripts? Submit a ticket via the OctoML [helpdesk](https://octoml.atlassian.net/servicedesk/customer/portal/6).
 
 ## Testing model performance with texture memory:
+In the table below you can see the performance numbers (inference time in
+milliseconds) which were achieved on the [Realme GT 5G](https://www.gsmarena.com/realme_gt_5g-10689.php).
+
+|                      | mace_mobilenetv1 | mace_resnet50_v2 | mace_inceptionv3 | vgg16  | mace_deeplabv3 | mace_yolov3 |
+|----------------------|------------------|------------------|------------------|--------|----------------|-------------|
+| TVM textures FP16    |              4,8 |            27,46 |            44,45 |  78,96 |         103,99 |      175,09 |
+| TVM textures FP16a32 |             5,42 |            28,51 |            44,31 |  96,64 |         110,32 |      242,34 |
+| TVM textures FP32    |             7,66 |            40,56 |            69,87 | 131,99 |         154,06 |      306,27 |
+
+The tuning log files are located in [logs/mace_models/](logs/mace_models/). You
+can use the `evaluate.py` script for reproducing these numbers. Copy the name of
+the model from the table and use the relevant log file with tuned statistic.
+Below, you can see examples of run mobilenetv1:
 ```
 # float16 compute, float16 accumulate
-python ./scripts/evaluate.py -m mobilenetv1 -t float16 -k android --target="opencl --device=adreno" -l ./logs/mobilenetv1.texture.float16.acc16.autotvm.log
+python ./scripts/evaluate.py -m mace_mobilenetv1 -t float16 -k android --target="opencl --device=adreno" -l ./logs/mace_models/mace_mobilenetv1.texture.float16.acc16.autotvm.log
 
 # float16 compute, float32 accumulate
-python ./scripts/evaluate.py -m mobilenetv1 -t float16 -k android --target="opencl --device=adreno" -l ./logs/mobilenetv1.texture.float16.acc32.autotvm.log
+python ./scripts/evaluate.py -m mace_mobilenetv1 -t float16 -k android --target="opencl --device=adreno" -l ./logs/mace_models/mace_mobilenetv1.texture.float16.acc32.autotvm.log
 
-# float16 compute, float16 accumulate
-python ./scripts/evaluate.py -m resnet50 -t float16 -k android --target="opencl --device=adreno" -l ./logs/resnet50.texture.float16.acc16.autotvm.log
-
-# float16 compute, float32 accumulate
-python ./scripts/evaluate.py -m resnet50 -t float16 -k android --target="opencl --device=adreno" -l ./logs/resnet50.texture.float16.acc32.autotvm.log
-
+# float32 inference
+python ./scripts/evaluate.py -m mace_mobilenetv1 -t float32 -k android --target="opencl --device=adreno" -l ./logs/mace_models/mace_mobilenetv1.texture.float32.acc32.autotvm.log
 ```
 Refer to the below instructions for running the `scripts/evaluate.py` script for more information
 
@@ -173,8 +182,4 @@ optional arguments:
   --debug DEBUG         Use graph runtime debugger to output per layer perf.
                         data and other statistics
 ```
-
-## Known issues ##
-Currently running with `-m deeplabv3 -t float16` will produce an internal invariant violation in TVM. This is known and under investigation.
-
 

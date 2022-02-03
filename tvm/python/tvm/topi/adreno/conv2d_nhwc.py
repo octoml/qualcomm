@@ -227,7 +227,7 @@ def schedule_conv2d_NHWC(cfg, s, output, args={}):
     n, y, x, fc, fb = s[conv].op.axis
     ry, rx, rcc, rcb = s[conv].op.reduce_axis
     cfg.define_split("tile_fc", fc, num_outputs=3,
-                filter=lambda entity: entity.size[1] <= 16 and entity.size[2] >= 2 and entity.size[2] < 128 )
+                filter=lambda entity: entity.size[1] <= 16 and entity.size[2] >= 2 and entity.size[2] < 256 )
     cfg.define_split("tile_y", y, num_outputs=3,
                 filter=lambda entity: entity.size[1] <= 16 and entity.size[2] < 16 )
     cfg.define_split("tile_x", x, num_outputs=3,

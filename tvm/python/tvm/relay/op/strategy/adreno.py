@@ -46,7 +46,7 @@ def conv2d_strategy_adreno(attrs, inputs, out_type, target):
             strategy.add_implementation(
                 wrap_compute_conv2d(topi.adreno.conv2d_nchwc_tpack_acc32),
                 wrap_topi_schedule(topi.adreno.schedule_conv2d_nchwc_tpack_acc32),
-                name="conv2d_nchwc_tpack.image2d",
+                name="conv2d_nchwc_tpack_acc32.image2d",
                 plevel=20
             )
             # strategy.add_implementation(

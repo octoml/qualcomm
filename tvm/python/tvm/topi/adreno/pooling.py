@@ -45,6 +45,7 @@ def schedule_pool(outs, layout):
         if isinstance(PaddedInput.op, tvm.te.ComputeOp):
             s[PaddedInput].compute_inline()
         num_thread = tvm.target.Target.current(allow_none=False).max_num_threads
+        num_thread = int(num_thread*2)
         if Pool.op in s.outputs:
             Out = Pool
             OL = s.cache_write(Pool, "local")
