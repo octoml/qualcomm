@@ -103,8 +103,8 @@ $ python scripts/texture.py -r 0.0.0.0 -p 9191 -k android --test=conv2d_NCHWc_KC
 On the host machine (typically your development box) you'll need to build TVM. 
 
 ```
-git clone https://github.com/apache/incubator-tvm.git --recursive
-cd incubator-tvm
+git clone https://github.com/octoml/qualcomm --recursive
+cd qualcomm/tvm
 mkdir build
 cp cmake/config.cmake build/.
 echo 'set(USE_LLVM llvm-config)' >> build/config.cmake
@@ -112,6 +112,10 @@ echo 'set(USE_GRAPH_RUNTIME_DEBUG ON)' >> build/config.cmake
 cd build
 cmake ..
 make -j8
+cd ..
+export TVM_HOME=$PWD
+export PYTHONPATH=$TVM_HOME/python:${PYTHONPATH}
+export LD_LIBRARY_PATH=${TVM_HOME}/build:$LD_LIBRARY_PATH
 ```
 
 ## Cross compiling the C++ RPC server for Android
