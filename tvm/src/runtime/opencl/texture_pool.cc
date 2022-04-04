@@ -71,7 +71,7 @@ class TexturePool::Pool {
         e = *best_mem;
         free_list_.erase(best_mem);
       }
-      else if (min_added_size_x <= width || min_added_size_y <= height) {
+      else if (static_cast<size_t>(min_added_size_x) <= width || static_cast<size_t>(min_added_size_y) <= height) {
         // if added size is less or equal to
         // what is needed by alloc, then grow entry
         device->FreeDataSpace(ctx, best_mem->data);
