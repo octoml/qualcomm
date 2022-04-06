@@ -16,7 +16,6 @@
 # under the License.
 """Definition of adreno operator strategy."""
 # pylint: disable=invalid-name,unused-argument,wildcard-import,unused-wildcard-import
-import re
 from tvm import topi
 from .generic import *
 from .. import op as _op
@@ -141,10 +140,19 @@ def schedule_pool_adreno(attrs, outs, target):
         else:
             return topi.cuda.schedule_pool(outs, attrs.layout)
 
+def is_nchw4c(outs):
+    for out in outs:
+        if len(out.shape) != 5 or out.shape[4] != 4:
+            return False
+    return True
+
 @schedule_concatenate.register("adreno")
 def schedule_concatenate_adreno(attrs, outs, target):
     with target:
-        return topi.adreno.schedule_concatenate(outs)
+        if is_nchw4c(outs):
+            return topi.adreno.schedule_concatenate(outs)
+        else:
+            return topi.cuda.schedule_injective(outs)
 
 #@schedule_injective.register("adreno")
 #def schedule_injective_adreno(attrs, outs, target):
