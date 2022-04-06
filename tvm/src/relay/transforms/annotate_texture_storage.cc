@@ -308,6 +308,30 @@ class StorageInfo : private ExprVisitor{
       if (isNCHW4c(call)) {
         supports_texture_storage = true;
       }
+    } else if (auto attrs = call->attrs.as<PadAttrs>()) {
+      if (isNCHW4c(call)) {
+      supports_texture_storage = true;
+      }
+    } else if (const OpNode *op = call->op.as<OpNode>()) {
+      String op_name = op->name;
+      //LOG(INFO) << "op node: " << op_name;
+      if (op_name == "add") {
+        if (isNCHW4c(call)) {
+        supports_texture_storage = true;
+        }
+      } else if (op_name == "multiply") {
+        if (isNCHW4c(call)) {
+        supports_texture_storage = true;
+        }
+      } else if (op_name == "maximum") {
+        if (isNCHW4c(call)) {
+        supports_texture_storage = true;
+        }
+      } else if (op_name == "nn.relu") {
+        if (isNCHW4c(call)) {
+        supports_texture_storage = true;
+        }
+      }
     }
 
     return supports_texture_storage;
