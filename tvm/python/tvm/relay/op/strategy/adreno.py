@@ -154,10 +154,10 @@ def schedule_concatenate_adreno(attrs, outs, target):
         else:
             return topi.cuda.schedule_injective(outs)
 
-#@schedule_injective.register("adreno")
-#def schedule_injective_adreno(attrs, outs, target):
-#    with target:
-#        if attrs.src_layout == "NCHW4c" or attrs.dst_layout == "NCHW4c":
-#            return topi.adreno.schedule_injective(outs)
-#        else:
-#            return topi.cuda.schedule_injective(outs)
+@schedule_injective.register("adreno")
+def schedule_injective_adreno(attrs, outs, target):
+    with target:
+        if is_nchw4c(outs):
+            return topi.adreno.schedule_injective(outs)
+        else:
+            return topi.cuda.schedule_injective(outs)
