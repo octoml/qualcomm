@@ -70,6 +70,54 @@ def schedule_concatenate(outs):
             schedule_concatenate_from_existing(s, out)
     return s
 
+def schedule_injective_from_existing(sch, out):
+    """Schedule for injective op from existing schedule.
+
+    Parameters
+    ----------
+    sch: Schedule
+         The schedule to update.
+    out: Tensor
+         The tensor representing the injective op.
+
+    Returns
+    -------
+    sch: Schedule
+         The updated schedule.
+    """
+    fused = sch[out].fuse(*sch[out].op.axis[:-1])
+    num_thread = tvm.target.Target.current(allow_none=False).max_num_threads
+
+    bx, tx = sch[out].split(fused, factor=num_thread)
+    sch[out].bind(tx, te.thread_axis("threadIdx.x"))
+    sch[out].bind(bx, te.thread_axis("blockIdx.x"))
+    sch[out].vectorize(sch[out].op.axis[-1])
+
+    return sch
+
+
+def schedule_injective(outs):
+    """Schedule for injective op.
+
+    Parameters
+    ----------
+    outs: Array of Tensor
+          The computation graph description of injective in the format
+          of an array of tensors.
+
+    Returns
+    -------
+    sch: Schedule
+        The computation schedule for the op.
+    """
+    outs = [outs] if isinstance(outs, te.tensor.Tensor) else outs
+    s = te.create_schedule([x.op for x in outs])
+
+    tvm.te.schedule.AutoInlineInjective(s)
+    for out in outs:
+        if not utils.is_empty_shape(out.shape):
+            schedule_injective_from_existing(s, out)
+    return s
 
 #schedule_elemwise = schedule_injective
 #schedule_broadcast = schedule_injective
