@@ -427,7 +427,12 @@ void CodeGenOpenCL::VisitExpr_(const CallNode* op, std::ostream& os) {
       PrintExpr(op->args[0], os);
       os << ")";
     } else {
-      CodeGenC::VisitExpr_(op, os);
+      std::string true_expr = SSAGetID(PrintExpr(op->args[1]), op->args[1]->dtype);
+      std::string false_expr = SSAGetID(PrintExpr(op->args[2]), op->args[2]->dtype);
+      os << "(";
+      PrintExpr(op->args[0], os);
+      os << " ? " << true_expr << " : " << false_expr;
+      os << ")";
     }
   } else {
     CodeGenC::VisitExpr_(op, os);
