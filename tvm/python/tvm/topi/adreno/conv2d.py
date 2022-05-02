@@ -272,19 +272,19 @@ def schedule_conv2d_NCHWc_KCRSk(cfg, s, output, args={}):
     elif args["shared"]:
         AA = s.cache_read(pad_data, "shared", [OL])
         WW = s.cache_read(kernel, "shared", [OL])
-    else:
-        AT = s.cache_read(pad_data, "texture", [OL])
-        def copy_to_texture(stage):
-            axes = s[stage].op.axis
-            fused = s[stage].fuse(*axes[:-1])
-            shape = get_const_tuple(stage.shape)
-            ftc = numpy.prod(shape[:-1])
-            div = getDiv(ftc, 64)
-            block, thread = s[stage].split(fused, factor=div)
-            s[stage].vectorize(axes[-1])
-            s[stage].bind(block, te.thread_axis("blockIdx.x"))
-            s[stage].bind(thread, te.thread_axis("threadIdx.x"))
-        copy_to_texture(AT)
+    #else:
+    #    AT = s.cache_read(pad_data, "texture", [OL])
+    #    def copy_to_texture(stage):
+    #        axes = s[stage].op.axis
+    #        fused = s[stage].fuse(*axes[:-1])
+    #        shape = get_const_tuple(stage.shape)
+    #        ftc = numpy.prod(shape[:-1])
+    #        div = getDiv(ftc, 64)
+    #        block, thread = s[stage].split(fused, factor=div)
+    #        s[stage].vectorize(axes[-1])
+    #        s[stage].bind(block, te.thread_axis("blockIdx.x"))
+    #        s[stage].bind(thread, te.thread_axis("threadIdx.x"))
+    #    copy_to_texture(AT)
 
     # tile and bind spatial axes
     n, fc, y, x, fb = s[output].op.axis
