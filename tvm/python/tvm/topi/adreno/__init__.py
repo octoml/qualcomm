@@ -22,3 +22,4 @@ from .conv2d_tpack import *
 from .conv2d_nhwc import *
 from .depthwise_conv2d_nhwc import *
 from .pooling import *
+from .injective import *

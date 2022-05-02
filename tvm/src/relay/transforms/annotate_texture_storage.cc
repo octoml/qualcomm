@@ -50,6 +50,34 @@ namespace tvm {
 namespace relay {
 namespace {
 
+bool isNCHW4c(const CallNode *call) {
+  if (auto attr = call->attrs.as<Conv2DAttrs>()) {
+    return attr->data_layout == "NCHW4c";
+  } else if (auto attr = call->attrs.as<MaxPool2DAttrs>()) {
+    return attr->layout == "NCHW4c";
+  } else if (auto attr = call->attrs.as<AvgPool2DAttrs>()) {
+    return attr->layout == "NCHW4c";
+  } else if (auto attr = call->attrs.as<GlobalPool2DAttrs>()) {
+    return attr->layout == "NCHW4c";
+  }
+
+  if (const TensorTypeNode *out_type = call->type_as<TensorTypeNode>()) {
+    Array<IndexExpr> shape = out_type->shape;
+    // NCHW4c must have 5 dimensions.
+    if (shape.size() != 5) {
+      return false;
+    }
+    // The last dimension of NCHW4c must be 4.
+    if (const IntImmNode *c = shape[4].as<IntImmNode>()) {
+      if (c->value == 4) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 class StorageInfo : private ExprVisitor{
  public:
   StorageInfo(const Map<Expr, Integer>& dev_map, const Map<Integer, Target>& target_map)
@@ -275,6 +303,34 @@ class StorageInfo : private ExprVisitor{
     } else if (auto attrs = call->attrs.as<AvgPool2DAttrs>()) {
       if (attrs->layout == "NCHW4c") {
         supports_texture_storage = true;
+      }
+    } else if (auto attrs = call->attrs.as<ConcatenateAttrs>()) {
+      if (isNCHW4c(call)) {
+        supports_texture_storage = true;
+      }
+    } else if (auto attrs = call->attrs.as<PadAttrs>()) {
+      if (isNCHW4c(call)) {
+      supports_texture_storage = true;
+      }
+    } else if (const OpNode *op = call->op.as<OpNode>()) {
+      String op_name = op->name;
+      //LOG(INFO) << "op node: " << op_name;
+      if (op_name == "add") {
+        if (isNCHW4c(call)) {
+        supports_texture_storage = true;
+        }
+      } else if (op_name == "multiply") {
+        if (isNCHW4c(call)) {
+        supports_texture_storage = true;
+        }
+      } else if (op_name == "maximum") {
+        if (isNCHW4c(call)) {
+        supports_texture_storage = true;
+        }
+      } else if (op_name == "nn.relu") {
+        if (isNCHW4c(call)) {
+        supports_texture_storage = true;
+        }
       }
     }
 

@@ -77,6 +77,10 @@ class CodeGenOpenCL final : public CodeGenC {
   // Whether to enable atomics extension.
   bool enable_atomics_{false};
   bool need_texture_ssa_{true};
+  // Marks whether we are lowering tir.texture2d_load().
+  // If we are, we will lower tir.if_then_else() to select(), otherwise
+  // we will keep the default lowering (i.e. to ternary op ? :).
+  bool lowering_texture2d_load_{false};
   std::unordered_map<const Object*, int32_t> allocation_size_;
 };
 

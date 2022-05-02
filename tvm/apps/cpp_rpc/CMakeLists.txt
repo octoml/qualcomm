@@ -32,7 +32,9 @@ endif()
 
 if(USE_OPENCL)
   if (ANDROID_ABI)
-    set_property(TARGET tvm_rpc PROPERTY LINK_FLAGS -fuse-ld=gold)
+    if(${ANDROID_NDK_MAJOR} VERSION_LESS "23")
+      set_property(TARGET tvm_rpc PROPERTY LINK_FLAGS -fuse-ld=gold)
+    endif()
   endif()
 endif()
 

@@ -26,6 +26,47 @@ from tvm.contrib import utils, ndk
 from tvm.topi import testing
 
 
+def layout_transform_rewrite(func, allow_buffer_output=False):
+    from tvm.relay.expr_functor import ExprMutator
+    from tvm.relay.op.op_attrs import LayoutTransformAttrs
+    from tvm.ir import IRModule
+
+    """
+    This pass adds a 1x1 max_pool2d with stride 1 before or after
+    layout_transform as a means of converting between buffer and image.
+    If the layout_transform converts NCHW -> NCHW4c, we would want the
+    NCHW4c output in image, hence we would want layout_transform -> max_pool2d.
+    By doing this, the subsequet op has its input in image for better performance.
+    If the layout_transform converts NCHW4c -> NCHW, we may want the NCHW4c
+    in image as well so that the preceding op as its output in image; however,
+    this may not be required for better performance, hence allow_buffer_output
+    can be used to control this rewrite.
+    Notie that the correctness of this rewrite depends on whether
+    the op preceding or succeeding layout_transform can properly handle image.
+    """
+    class LayoutTransformRewrite(ExprMutator):
+        def visit_call(self, call):
+            new_call = super().visit_call(call)
+
+            attrs = new_call.attrs
+            if isinstance(attrs, LayoutTransformAttrs):
+                assert len(new_call.args) == 1, "layout_transform has unexpected args"
+
+                if attrs.src_layout == "NCHW" and attrs.dst_layout == "NCHW4c":
+                    C = relay.nn.max_pool2d(new_call, pool_size=(1,1), layout="NCHW4c")
+                    return C
+                if attrs.src_layout == "NCHW4c" and attrs.dst_layout == "NCHW" and \
+                   allow_buffer_output == False :
+                    C = relay.nn.max_pool2d(new_call.args[0], pool_size=(1,1), layout="NCHW4c")
+                    C = relay.layout_transform(C, attrs.src_layout, attrs.dst_layout)
+                    return C
+            return new_call
+
+    pazz = LayoutTransformRewrite()
+    func = pazz.visit(func)
+    new_mod = IRModule.from_expr(func)
+    return new_mod
+
 class ModelImporter(object):
     def available_models(self):
         import inspect
@@ -189,6 +230,7 @@ class ModelImporter(object):
                 seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
                 with tvm.transform.PassContext(opt_level=3):
                     mod = seq(mod)
+        mod = layout_transform_rewrite(mod["main"], allow_buffer_output=True)
         # downcast to float16
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
@@ -215,6 +257,7 @@ class ModelImporter(object):
                 seq = tvm.transform.Sequential([relay.transform.ConvertLayout(desired_layouts)])
                 with tvm.transform.PassContext(opt_level=3):
                     mod = seq(mod)
+        mod = layout_transform_rewrite(mod["main"], allow_buffer_output=True)
         # downcast to float16
         if dtype == "float16":
             mod = downcast_fp16(mod["main"], mod)
@@ -434,6 +477,7 @@ class ModelImporter(object):
                     mod = seq(mod)
             mod = relay.quantize.prerequisite_optimize(mod, params)
         #print(mod)
+        mod = layout_transform_rewrite(mod["main"], allow_buffer_output=True)
         return (mod, params, input_shape, dtype, target)
 
     def import_yolov3_mxnet(self, target="llvm", dtype="float32"):

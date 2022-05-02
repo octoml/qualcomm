@@ -107,6 +107,23 @@ def TextureFlatten():
     """
     return _ffi_api.TextureFlatten()
 
+def RewriteTextureConditionals():
+    """Rewrites if_then_else(texture2d_load()) to texture2d_load(if_then_else).
+
+    In particular, it rewrites the above pattern so that the condition is placed
+    on the coordinates. Originally, if_then_else chooses between texture2d_load
+    and 0. After rewrite, if_then_else chooses between a valid coordinate and
+    -1, allowing utilizing hardware OOB handling.
+
+    Parameters
+    ----------
+
+    Returns
+    -------
+    fpass : tvm.transform.Pass
+        The result pass
+    """
+    return _ffi_api.RewriteTextureConditionals()
 
 def InjectCopyIntrin(pragma_key, fintrin):
     """Inject virtual thread loops.

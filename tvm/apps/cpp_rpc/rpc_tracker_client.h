@@ -111,7 +111,7 @@ class TrackerClient {
 
       std::ostringstream ss;
       ss << "[" << static_cast<int>(TrackerCode::kPut) << ", \"" << key_ << "\", [" << port
-         << ", \"" << *matchkey << "\"], " << custom_addr_ << "]";
+         << ", \"" << *matchkey << "\"], \"" << custom_addr_ << "\"]";
 
       tracker_sock_.SendBytes(ss.str());
 
@@ -163,7 +163,7 @@ class TrackerClient {
 
             std::ostringstream ss;
             ss << "[" << static_cast<int>(TrackerCode::kPut) << ", \"" << key_ << "\", [" << port
-               << ", \"" << *matchkey << "\"], " << custom_addr_ << "]";
+               << ", \"" << *matchkey << "\"], \"" << custom_addr_ << "\"]";
             tracker_sock_.SendBytes(ss.str());
 
             std::string remote_status = tracker_sock_.RecvBytes();
