@@ -12,7 +12,7 @@ milliseconds) which were achieved on the [Realme GT 5G](https://www.gsmarena.com
 |----------------------|-----------------------|------------------|------------------|-------------|----------------|-------------|
 | TVM textures FP16    |                  4,82 |            35,89 |            39,07 |       56,37 |          58,05 |      171,93 |
 | TVM textures FP16a32 |                  5,15 |            38,12 |            40,18 |       65,14 |          61,85 |      192,15 |
-| TVM textures FP32    |                  7,62 |            58,61 |            59,74 |      101,29 |          94,14 |      299,09 |
+| TVM textures FP32    |                  7,62 |            58,61 |            59,74 |        96,9 |           85,5 |      276,61 |
 
 The tuning log files are located in [logs/](logs/). You
 can use the `evaluate.py` script for reproducing these numbers. Copy the name of
