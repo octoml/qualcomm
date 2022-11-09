@@ -419,7 +419,9 @@ def convert_to_dtype(mod, dtype):
                 relay.transform.ToMixedPrecision()
             ]
         )
-        with tvm.transform.PassContext(opt_level=3):
+        with tvm.transform.PassContext(
+                config={"relay.ToMixedPrecision.keep_orig_output_dtype": True},
+                opt_level=3):
             mod = seq(mod)
     return mod
 
