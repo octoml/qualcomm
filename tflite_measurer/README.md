@@ -27,5 +27,5 @@
    ```
 3. Run the benchmarking:
    ```bash
-   ./run_benchmark.sh ./models/mobilenet-v1-1.0.tflite
+   ./run_benchmark.sh -m ./models/mobilenet-v1-1.0.tflite -t FP16
    ```
