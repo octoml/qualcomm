@@ -58,9 +58,9 @@ done
 file_name=${MODEL##*/}
 
 if [ "$DEVICE" == "" ]; then
-    preamble='adb'
+    preamble="adb"
 else
-    preamble='adb -s ${DEVICE}'
+    preamble="adb -s ${DEVICE}"
 fi
 
 if [ "$TYPE" != "FP32" ]; then

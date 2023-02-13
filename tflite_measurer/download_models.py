@@ -2,7 +2,7 @@ import os
 
 
 MODELS_DIR = "models"
-MODELS = ["mobilenet", "resnet50", "inception", "vgg16", "deeplab", "yolo"]
+# If the url has a path to local file then download step will be skipped and the model should be just converted to TFLite format
 MODELS_INFO = {
     "mobilenet": {
         "url": "https://cnbj1.fds.api.xiaomi.com/mace/miai-models/mobilenet-v1/mobilenet-v1-1.0.pb",
@@ -30,7 +30,18 @@ MODELS_INFO = {
         "input_shapes": {"input_1": [1, 416, 416, 3]},
         "output_names": ["conv2d_59/BiasAdd", "conv2d_67/BiasAdd", "conv2d_75/BiasAdd"],
     },
+    "classifier": {
+        "url": "{}/classifier.pb".format(MODELS_DIR),
+        "input_shapes": {"image": (1, 300, 300, 3)},
+        "output_names": ["Edgetpu_M/prob", "Edgetpu_M/prob_openset"],
+    },
+    "detector": {
+        "url": "{}/detector.pb".format(MODELS_DIR),
+        "input_shapes": {"input" : [1, 320, 320, 3], "anchors": [1, 1, 19125, 4]},
+        "output_names": ["AIG/classification_2", "AIG/clipped_boxes/concat"],
+    },
 }
+MODELS = MODELS_INFO.keys()
 
 
 def get_args():
@@ -84,10 +95,13 @@ def convert_tf_to_tflite(tf_file_name, model):
 def process(model):
     import urllib.request
 
-    local_file = "model.pb"
-    urllib.request.urlretrieve(MODELS_INFO[model]["url"], local_file)
-    convert_tf_to_tflite(local_file, model)
-    os.remove(local_file)
+    if os.path.isfile(MODELS_INFO[model]["url"]):
+        convert_tf_to_tflite(MODELS_INFO[model]["url"], model)
+    else:
+        local_file = "model.pb"
+        urllib.request.urlretrieve(MODELS_INFO[model]["url"], local_file)
+        convert_tf_to_tflite(local_file, model)
+        os.remove(local_file)
 
 if __name__ == '__main__':
     args = get_args()
