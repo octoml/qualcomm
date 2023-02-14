@@ -72,5 +72,5 @@ else
 fi
 
 $preamble push $MODEL /data/local/tmp
-$preamble shell /data/local/tmp/benchmark_model --graph=/data/local/tmp/${file_name} --use_gpu=true --gpu_backend=cl $infer_type
+$preamble shell /data/local/tmp/benchmark_model --graph=/data/local/tmp/${file_name} --num_runs=500 --use_gpu=true --gpu_backend=cl $infer_type
 $preamble shell rm -f /data/local/tmp/${file_name}
