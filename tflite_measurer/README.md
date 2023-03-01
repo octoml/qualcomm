@@ -29,3 +29,30 @@
    ```bash
    ./run_benchmark.sh -m ./models/mobilenet-v1-1.0.tflite -t FP16
    ```
+
+## Connect to the remote adb
+1. Forward local `5037` port to remote machine: `ssh -L 5037:localhost:5037 -N username@host -p port`
+2. Try to run `adb devices`. If there are no errors then congrats, you have
+   forwarded `adb` from remote machine to local. If you see similar error:
+   ```
+   adb server version (39) doesn't match this client (41); killing...
+   ```
+   then go to the next step.
+3. Copy `adb` from remote machine to local. You can find `adb` location by the
+   following command: `which adb`
+4. Try to run new `adb` executor locally. If there are any errors that some
+   libraries were not found than go to the remote machine and run
+   `ldd /path/to/adb`. It will print path to used libraries and copy them to the
+   local machine into the directory with `adb` execution file.
+5. Finally `adb devices` should print list of the devices which are attached to
+   remote machine.
+
+## Collect GPU per-layer statistic
+0. If you use `adb` which was copied from a remote machine (as described in
+   section "Connect to the remote adb"), then add directory with `adb` file to
+   `PATH` and `LD_LIBRARY_PATH` environment variables.
+1. Go to the directory with source code of TensorFlow.
+2. Run the following command:
+   ```
+   tensorflow/lite/delegates/gpu/cl/testing/run_performance_profiling.sh -m /path/to/tflite/model.tflite -d <device_hash> -t FP16
+   ```
