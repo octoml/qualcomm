@@ -14,10 +14,10 @@ milliseconds) which were achieved on the [Realme GT 5G](https://www.gsmarena.com
 | TVM textures FP16a32 |                  5,15 |            38,12 |            40,18 |       65,14 |          61,85 |      192,15 |
 | TVM textures FP32    |                  7,62 |            58,61 |            59,74 |        96,9 |           85,5 |      276,61 |
 
-The tuning log files are located in [logs/](logs/). You
+The tuning log files for Snapdragon 888 architecture are located in [logs/](logs/) and corresponding log files for Snapdragon 8 Gen 1 are located in [logs_gen1/](logs_gen1/). You
 can use the `evaluate.py` script for reproducing these numbers. Copy the name of
 the model from the table and use the relevant log file with tuned statistic.
-Below, you can see examples of run mobilenetv1:
+Below, you can see examples of mobilenetv1 evaluation with SD 888 statistics:
 ```
 # float16 compute, float16 accumulate
 python ./evaluate.py -m mace_mobilenetv1_nchw -t float16 -k android --target="opencl --device=adreno" -l ./logs/mace_mobilenetv1_nchw.texture.float16.acc16.autotvm.log
@@ -29,6 +29,36 @@ python ./evaluate.py -m mace_mobilenetv1_nchw -t float16_acc32 -k android --targ
 python ./evaluate.py -m mace_mobilenetv1_nchw -t float32 -k android --target="opencl --device=adreno" -l ./logs/mace_mobilenetv1_nchw.texture.float32.autotvm.log
 ```
 Refer to the below instructions for running the `scripts/evaluate.py` script for more information
+
+## Run models with dynamic shape through VM
+In the table below you can see the performance numbers for a set of models from Onnx model zoo which were achieved on the `Qualcomm Snapdragon 8 Gen 1`:
+
+|                  |   onnx_ssd_resnet34   |   onnx_yolo_v3   | onnx_faster_rcnn |   mace_mobilenetv1_nchw  | mace_resnet50_v2 |
+|------------------|-----------------------|------------------|------------------|--------------------------|------------------|
+| TVM FP16    (GE) |                 160,69|             47,38|            203,98|                      3,04|             24,53|
+| TVM FP16    (VM) |                 496,83|             66,44|            208,31|                      3,11|             24,63|
+| TVM FP16a32 (GE) |                 419,32|             83,63|            356,07|                    4,0653|           29,6857|
+| TVM FP16a32 (VM) |                 679,18|             97,99|            361,37|                         -|                 -|
+| TVM FP32    (GE) |                 206,97|             70,14|            272,82|                      4,22|             35,46|
+| TVM FP32    (VM) |                 608,26|             95,07|            278,80|                      4,28|             42,43|
+
+*Virtual Machine has performance degradation only on Non Max Suppression layers, which seems to be a bug, that nevertheless affects the final performance ([issue#15405](https://github.com/apache/tvm/issues/15405)).*
+
+Script `evaluate.py` was extended by three models from ONNX model zoo with dynamic shape: [onnx_ssd_resnet34](https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/ssd), [onnx_yolo_v3](https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/yolov3) and [onnx_faster_rcnn](https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/faster-rcnn). They can be inferred by using the following names of the models: `onnx_ssd_resnet34`, `onnx_yolo_v3` and `onnx_faster_rcnn`.
+
+These models can not be executed by GE, so it is necessary to pass additioal argument to `evaluate.py`: `--VM`, that means that the model should be inferred by using VM.
+
+Additionaly, the script `evaluate_dyn_models.py` could be used to tune and evaluate static layers from dynamic models (`onnx_ssd_resnet34`, `onnx_yolo_v3`, `onnx_faster_rcnn`) with both Graph Executor or Virtual Machine. This script was added to compare VM performance vs GE. Below, you can see examples of `onnx_ssd_resnet34` evaluation with SD 8 Gen 1 statistics:
+```
+# float16 compute, float16 accumulate
+python ./evaluate_dyn_models.py -m onnx_ssd_resnet34 -t float16 -k android --target="opencl --device=adreno" -l ./logs_gen1/onnx_ssd_resnet34.float16.acc16.autotvm.log
+
+# float16 compute, float32 accumulate
+python ./evaluate_dyn_models.py -m onnx_ssd_resnet34 -t float16_acc32 -k android --target="opencl --device=adreno" -l ./logs_gen1/onnx_ssd_resnet34.float16.acc32.autotvm.log
+
+# float32 inference
+python ./evaluate_dyn_models.py -m onnx_ssd_resnet34 -t float32 -k android --target="opencl --device=adreno" -l ./logs_gen1/onnx_ssd_resnet34.float32.autotvm.log
+```
 
 ## Setting up the host development machine
 
@@ -92,16 +122,49 @@ Finally, make sure that the hardware is properly registered to the tracker. On t
 python -m tvm.exec.query_rpc_tracker --host <tracker IP> --port <tracker port>
 ```
 
-## Using the experiment script
+## Using the experiment script 'evaluate.py'
 
 A python script `evaluate.py` can evaluate or tune a set of models.
 
 Usage for the script, you can get with:
 
 ```
-$ python3 scripts/evaluate.py -h
+$ python3 ./evaluate.py -h
 ```
 
+Example of tuning:
+
+```
+$ python3 ./evaluate.py -m mace_mobilenetv1_nchw -t float16 -k android --target="opencl --device=adreno" -l ./logs/mace_mobilenetv1_nchw.texture.float16.acc16.autotvm.log --tune
+```
+
+Example of evaluation with VM executor:
+
+```
+$ python3 ./evaluate.py -m mace_mobilenetv1_nchw -t float16 -k android --target="opencl --device=adreno" -l ./logs/mace_mobilenetv1_nchw.texture.float16.acc16.autotvm.log --VM
+```
+
+## Using the experiment script 'evaluate_dyn_models.py'
+
+A python script `evaluate_dyn_models.py` can evaluate or tune the layers from a set of dynamic models.
+
+Usage for the script, you can get with:
+
+```
+$ python3 ./evaluate_dyn_models.py -h
+```
+
+Example of tuning:
+
+```
+$ python3 ./evaluate_dyn_models.py -m ssd -t float16 -k android --target="opencl --device=adreno" -l ./logs_gen1/onnx_ssd_resnet34.float16.acc16.autotvm.log --tune
+```
+
+Example of evaluation with VM executor:
+
+```
+$ python3 ./evaluate_dyn_models.py -m ssd -t float16 -k android --target="opencl --device=adreno" -l ./logs_gen1/onnx_ssd_resnet34.float16.acc16.autotvm.log --VM
+```
 ## Helper applications
 In directory [apps/](apps/) there are two applications which can be used for
 profiling separate OpenCL kernels:
