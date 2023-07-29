@@ -11,11 +11,11 @@ class TestFaster():
     def __init__(self):
         self.target_host = "llvm -mtriple=arm64-linux-android"
         self.target = "opencl --device=adreno"
-        self.rpc_key = "android"
+        self.rpc_key = "android2"
         self.rpc_tracker_host = "0.0.0.0"
-        self.rpc_tracker_port = 8790
+        self.rpc_tracker_port = 9191
 
-        self.dtype = "float16"
+        self.dtype = "float32"
         self.stat_file = f"faster_{self.dtype}.autotvm.log"
 
         self.layers_data_bn = [
@@ -67,6 +67,32 @@ class TestFaster():
             ((1, 507, 4), (1, 1, 507), 2000, 0.7, 0)
         ]
     
+    def advanced_time_evaluator(self, m, func_name, ctx, number=1, repeat=1, min_repeat_ms=0, time_to_work_ms=0, cooldown_interval_ms=0, f_preproc=""):
+        import inspect
+        import math
+        def ms_to_s(ms): 
+            return ms / 1000
+        one_run_time = m.module.time_evaluator(func_name, ctx, number=1,repeat=1,min_repeat_ms=0)().results[0]
+        repeats_to_cooldown = max(round(ms_to_s(time_to_work_ms)/one_run_time), 1)
+
+        def _time_evaluator(func_name, m, ctx, number=1, repeat=1, min_repeat_ms=0, cooldown_interval_ms=0, repeats_to_cooldown=1, f_preproc=""):
+            def evaluator():
+                import time
+                from tvm.runtime.module import BenchmarkResult
+                results = []
+                for _ in range(math.ceil(repeat / repeats_to_cooldown)):
+                    time_f = m.module.time_evaluator(func_name, ctx, number=number, repeat=repeats_to_cooldown, min_repeat_ms=min_repeat_ms, f_preproc=f_preproc)
+                    results.append(time_f().results)
+                    time.sleep(ms_to_s(cooldown_interval_ms))
+                return BenchmarkResult([np.mean(r) for r in results])
+            return evaluator
+
+        if inspect.signature(m.module.time_evaluator).parameters.get("cooldown_interval_ms"):
+            time_f = m.module.time_evaluator(func_name, ctx, number=number, repeat=repeat, min_repeat_ms=min_repeat_ms, cooldown_interval_ms=cooldown_interval_ms, repeats_to_cooldown=repeats_to_cooldown, f_preproc=f_preproc)
+        else:
+            time_f = _time_evaluator(func_name, m, ctx, number=number, repeat=repeat, min_repeat_ms=min_repeat_ms, cooldown_interval_ms=cooldown_interval_ms, repeats_to_cooldown=repeats_to_cooldown, f_preproc=f_preproc)
+            
+        return time_f
 
     def generate_model_bn(self, dtype, input_shape, filter_shape, padding, strides, relu):
         input = tvm.relay.var("input", shape=input_shape, dtype=dtype)
@@ -208,7 +234,6 @@ class TestFaster():
             )
         )
         self.tracker = rpc.connect_tracker(self.rpc_tracker_host, self.rpc_tracker_port)
-        print("!!")
         self.remote = self.tracker.request(
             self.rpc_key, priority=0, session_timeout=6000
         )
@@ -253,14 +278,34 @@ class TestFaster():
         module.set_input("input", inp)
         print("Evaluating...", flush=True)
         number = 1
-        repeat = 50
-        module.run(number=number, repeat=repeat)
+        repeat = 1
+        min_repeat_ms = 0
+        time_to_work_ms = 1000
+        cooldown_interval_ms=1000
+        module.run()
+        time_f = self.advanced_time_evaluator(module, "run", dev, number, repeat, min_repeat_ms, time_to_work_ms, cooldown_interval_ms)
+        benchmarkResult = time_f()
+        cost = benchmarkResult.mean
+        print("%g secs/iteration\n" % cost)
+        cost_ms = cost * 1000
+        print(f"{cost_ms} ms/iteration\n")
 
-    def run_module_nms(self, module, dtype):
+    def run_module_nms(self, module, boxes_shape, dev):
+        inp = np.random.normal(size=boxes_shape).astype('float32')
+        module.set_input("boxes", inp)
         print("Evaluating...", flush=True)
         number = 1
-        repeat = 50
-        module.run(number=number, repeat=repeat)
+        repeat = 1
+        min_repeat_ms = 0
+        time_to_work_ms = 1000
+        cooldown_interval_ms=1000
+        module.run()
+        time_f = self.advanced_time_evaluator(module, "run", dev, number, repeat, min_repeat_ms, time_to_work_ms, cooldown_interval_ms)
+        benchmarkResult = time_f()
+        cost = benchmarkResult.mean
+        print("%g secs/iteration\n" % cost)
+        cost_ms = cost * 1000
+        print(f"{cost_ms} ms/iteration\n")
 
     def kill(self):
         del self.remote
@@ -275,8 +320,11 @@ class TestFaster():
             mod, params = self.generate_model_bias_add(self.dtype, input_shape, filter_shape, workload_padding, strides, relu)
             self.tune_model(mod, params)
         
+        for boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold in self.nms_data:
+            mod, params = self.generate_model_nms(boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold)
+            self.tune_model(mod, params)
+        
     def test_run(self):
-
         for input_shape, filter_shape, workload_padding, strides, relu in self.layers_data_bn:
             mod, params = self.generate_model_bn(self.dtype, input_shape, filter_shape, workload_padding, strides, relu)
             self.connect_tracker()
@@ -304,14 +352,14 @@ class TestFaster():
             self.connect_tracker()
             graph, lib, params = self.build_model_with_stat(mod, params, self.stat_file)
             rlib, module, dev = self.create_module(graph, lib, debug=True)
-            self.run_module_nms(module, self.dtype)
+            self.run_module_nms(module, boxes_shape, dev)
             del dev
             del module
             del rlib
             self.kill()
 
     def run_full(self):
-            self.test_tune()
+            #self.test_tune()
             self.test_run()
 
 

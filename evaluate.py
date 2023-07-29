@@ -18,13 +18,13 @@
 import os
 import numpy as np
 
-import mxnet.gluon as gluon
 import tvm
 from tvm import relay
 from tvm.relay import testing
 from tvm import autotvm
 from tvm.contrib import utils, ndk
 from tvm.topi import testing
+
 
 from tvm.relay.op import register_mixed_precision_conversion
 
@@ -307,6 +307,99 @@ class ModelImporter(object):
 
         return (mod, params, shape_dict, dtype, target, Yolov3Validator(shape_dict))
 
+
+    def import_onnx_ssd_resnet34(self, target="llvm", dtype="float32"):
+        archive_url = "https://github.com/onnx/models/raw/main/vision/object_detection_segmentation/ssd/model/ssd-12.tar.gz"
+        filename = "ssd-12.tar.gz"
+        from tvm.contrib import download
+        import onnx
+        import tarfile
+        download.download(archive_url, filename)
+        archive = tarfile.open(filename)
+        directory = "ssd_resnet34"
+        archive.extractall(directory)
+        archive.close()
+        directory = os.path.join(directory, "ssd-12")
+        model_file = os.path.join(directory, "ssd-12.onnx")
+        onnx_model = onnx.load(model_file)
+        shape_dict = {"image": (1, 3, 1200, 1200)}
+        mod, params = relay.frontend.from_onnx(onnx_model, shape_dict, freeze_params=True)
+        test_files_dir = os.path.join(directory, "test_data_set_0")
+
+        # downcast to float16
+        mod = convert_to_dtype(mod["main"], dtype)
+        dtype = "float32" if dtype == "float32" else "float16"
+
+        return (mod, params, shape_dict, dtype, target, ONNXTestSamplesValidator(test_files_dir, input_names=list(shape_dict.keys())))
+
+
+    def import_onnx_yolo_v3(self, target="llvm", dtype="float32"):
+        archive_url = "https://github.com/onnx/models/raw/main/vision/object_detection_segmentation/yolov3/model/yolov3-12.tar.gz"
+        filename = "yolov3-12.tar.gz"
+        from tvm.contrib import download
+        import onnx
+        import tarfile
+        download.download(archive_url, filename)
+        archive = tarfile.open(filename)
+        directory = "onnx_yolov3"
+        archive.extractall(directory)
+        archive.close()
+        directory = os.path.join(directory, "yolov3-12")
+        model_file = os.path.join(directory, "yolov3-12.onnx")
+        onnx_model = onnx.load(model_file)
+        shape_dict = {
+            "input_1": (1, 3, 416, 416),
+            "image_shape": (1, 2),
+        }
+        mod, params = relay.frontend.from_onnx(onnx_model, shape_dict, freeze_params=True)
+        test_files_dir = os.path.join(directory, "test_data_set_0")
+
+        # downcast to float16
+        mod = convert_to_dtype(mod["main"], dtype)
+        dtype = "float32" if dtype == "float32" else "float16"
+        print("=" * 10)
+        print(mod)
+        print("=" * 10)
+
+        return (mod, params, shape_dict, dtype, target, ONNXTestSamplesValidator(test_files_dir, input_names=list(shape_dict.keys())))
+
+
+    def import_onnx_faster_rcnn(self, target="llvm", dtype="float32"):
+        archive_url = "https://github.com/onnx/models/raw/main/vision/object_detection_segmentation/faster-rcnn/model/FasterRCNN-12.onnx"
+        filename = "FasterRCNN-12"
+        from tvm.contrib import download
+        import onnx
+        download.download(archive_url, filename)
+        onnx_model = onnx.load(filename)
+        shape_dict = {
+            "image": (3, 800, 800),
+        }
+        mod_file = "onnx_faster_rcnn_mod.json"
+        params_file = "onnx_faster_rcnn_params.json"
+        if not os.path.exists(mod_file):
+            mod, params = relay.frontend.from_onnx(onnx_model, shape_dict, freeze_params=True)
+
+            # downcast to float16
+            mod = convert_to_dtype(mod["main"], dtype)
+            with open(mod_file, "w") as file:
+                file.write(tvm.ir.save_json(mod))
+
+            with open(params_file, "wb") as file:
+                file.write(relay.save_param_dict(params))
+        else:
+            with open(mod_file, "r") as file:
+                mod = tvm.ir.load_json(file.read())
+
+            with open(params_file, "rb") as file:
+                params = relay.load_param_dict(file.read())
+        dtype = "float32" if dtype == "float32" else "float16"
+        print("=" * 10)
+        print(mod)
+        print("=" * 10)
+
+        return (mod, params, shape_dict, dtype, target)
+
+
 def get_args():
     import argparse
 
@@ -366,6 +459,11 @@ def get_args():
         "--debug",
         action="store_true",
         help="Use graph runtime debugger to output per layer perf. data and other statistics",
+    )
+    parser.add_argument(
+        "--VM",
+        action="store_true",
+        help="Use VM compiling and benchmarking",
     )
 
     args = parser.parse_args()
@@ -619,10 +717,13 @@ class ImageNetValidator(Validator):
 
         self.inputs = {name : image}
 
-    def Validate(self, m, ref_outputs=[]):
-        tvm_output = m.get_output(0)
+    def Validate(self, m, ref_outputs=[], data=[]):
+        if isinstance(m, tvm.runtime.vm.VirtualMachine) or isinstance(m, tvm.runtime.profiler_vm.VirtualMachineProfiler):
+            tvm_output = m.invoke("main", **data)
+        else:
+            tvm_output = m.get_output(0)
         #import ipdb; ipdb.set_trace()
-        top_categories = np.argsort(tvm_output.asnumpy()[0])
+        top_categories = np.argsort(tvm_output.asnumpy()[0])  # TODO: top_categories = np.argsort(tvm_output.asnumpy()[0]) AttributeError: 'NoneType' object has no attribute 'asnumpy'
         # Report top-5 classification results
         print("\nTop5 predictions: \n")
         top5 = np.flip(top_categories, axis=0)[:5]
@@ -653,7 +754,7 @@ class VOCValidator(Validator):
         scale = min(w/iw, h/ih)
         nw = int(iw*scale)
         nh = int(ih*scale)
-        
+
         from PIL import Image
         image = image.resize((nw,nh), Image.BICUBIC)
         new_image = Image.new('RGB', size, (128,128,128))
@@ -709,8 +810,8 @@ class Deeplabv3Validator(Validator):
         self.dtype = dtype
         self.inputs = {}
         for key in input_shape:
-            self.inputs[key] = np.random.normal(size=input_shape[key]).astype(self.dtype)
-        
+            self.inputs[key] = np.random.normal(size=input_shape[key]).astype("float32")
+
         categ_url = "https://github.com/Deelvin/qualcomm/raw/avoronov/rebase_master_v2/"
         categ_fn = "deeplabv3_reference_output_{}".format(dtype)
         download.download(join(categ_url, categ_fn), categ_fn)
@@ -724,13 +825,20 @@ class Deeplabv3Validator(Validator):
         if self.dtype == "float16":
             rtol=1e-1
             atol=1e-1
-        if self.dtype == "float32": 
+        if self.dtype == "float32":
             rtol=1e-3
             atol=1e-3
-        for i in range(m.get_num_outputs()):
-            tvm_output = m.get_output(i)
-            np.testing.assert_allclose(tvm_output.asnumpy(), ref_outputs[i], rtol=rtol, atol=atol)
-        print("Deeplabv3Validator pass:", "rtol", rtol, "atol",atol)
+        if isinstance(m, tvm.runtime.vm.VirtualMachine) or isinstance(m, tvm.runtime.profiler_vm.VirtualMachineProfiler):
+            outputs = m.get_outputs()
+            for i in range(len(outputs)):
+                tvm_output = outputs[i]
+                np.testing.assert_allclose(tvm_output.asnumpy(), ref_outputs[i], rtol=rtol, atol=atol)
+            print("Deeplabv3Validator pass:", "rtol", rtol, "atol",atol)
+        else:
+            for i in range(m.get_num_outputs()):
+                tvm_output = m.get_output(i)
+                np.testing.assert_allclose(tvm_output.asnumpy(), ref_outputs[i], rtol=rtol, atol=atol)
+            print("Deeplabv3Validator pass:", "rtol", rtol, "atol",atol)
 
 class Yolov3Validator(Validator):
     class BoundBox:
@@ -799,7 +907,7 @@ class Yolov3Validator(Validator):
             boxes[i].xmax = int((boxes[i].xmax - x_offset) / x_scale * image_w)
             boxes[i].ymin = int((boxes[i].ymin - y_offset) / y_scale * image_h)
             boxes[i].ymax = int((boxes[i].ymax - y_offset) / y_scale * image_h)
-    
+
     def bbox_iou(box1, box2):
         def _interval_overlap(interval_a, interval_b):
             x1, x2 = interval_a
@@ -840,8 +948,12 @@ class Yolov3Validator(Validator):
     # load and prepare an image
     @staticmethod
     def load_image_pixels(filename, shape):
-        from keras.preprocessing.image import load_img
-        from keras.preprocessing.image import img_to_array
+        try:
+            from keras.preprocessing.image import load_img
+            from keras.preprocessing.image import img_to_array
+        except:
+            from tensorflow.keras.utils import load_img
+            from tensorflow.keras.utils import img_to_array
         # load the image to get its shape
         image = load_img(filename)
         width, height = image.size
@@ -929,45 +1041,55 @@ class Yolov3Validator(Validator):
         self.image_w = image_w
         self.image_h = image_h
         self.image = image
-        self.inputs = { list(input_shape.keys())[0]: image } 
+        self.inputs = { list(input_shape.keys())[0]: image }
+
+class ONNXTestSamplesValidator(Validator):
+    def __init__(self, test_data_dir, input_names, dtype="float32"):
+        import onnx
+        import glob
+        from onnx import numpy_helper
+
+        self.test_data_dir = test_data_dir
+        inputs_num = len(glob.glob(os.path.join(test_data_dir, 'input_*.pb')))
+        self.inputs = {}
+        for i in range(inputs_num):
+            input_file = os.path.join(test_data_dir, 'input_{}.pb'.format(i))
+            tensor = onnx.TensorProto()
+            with open(input_file, 'rb') as f:
+                tensor.ParseFromString(f.read())
+            inp = numpy_helper.to_array(tensor)
+            self.inputs[input_names[i]] = inp
 
     def Validate(self, m, ref_outputs=[], show=False):
-        # output  
-        num_outputs = m.get_num_outputs()
-        outputs = []
-        for i in range(num_outputs):
-            tvm_output = m.get_output(i)
-            outputs.append(tvm_output.asnumpy())
+        import onnx
+        import glob
+        from onnx import numpy_helper
+        # output
+        if isinstance(m, tvm.runtime.vm.VirtualMachine) or isinstance(m, tvm.runtime.profiler_vm.VirtualMachineProfiler):
+            outputs = []
+            tmp = m.get_outputs()
+            for i in range(len(tmp)):
+                tvm_output = tmp[i]
+                outputs.append(tvm_output.asnumpy())
+        else:
+            num_outputs = m.get_num_outputs()
+            outputs = []
+            for i in range(num_outputs):
+                tvm_output = m.get_output(i)
+                outputs.append(tvm_output.asnumpy())
+        refs = []
+        inputs_num = len(glob.glob(os.path.join(self.test_data_dir, 'output_*.pb')))
+        self.inputs = {}
+        for i in range(inputs_num):
+            input_file = os.path.join(self.test_data_dir, 'output_{}.pb'.format(i))
+            tensor = onnx.TensorProto()
+            with open(input_file, 'rb') as f:
+                tensor.ParseFromString(f.read())
+            refs.append(numpy_helper.to_array(tensor))
 
-        # summarize the shape of the list of arrays
-        print([a.shape for a in outputs])
-
-        # define the anchors
-        anchors = [[116,90, 156,198, 373,326], [30,61, 62,45, 59,119], [10,13, 16,30, 33,23]]
-
-        # define the probability threshold for detected objects
-        class_threshold = 0.6
-        boxes = []
         for i in range(len(outputs)):
-            # decode the output of the network
-            boxes += Yolov3Validator.decode_netout(outputs[i][0], anchors[i], class_threshold, self.input_h, self.input_w)
-        # correct the sizes of the bounding boxes for the shape of the image
-        Yolov3Validator.correct_yolo_boxes(boxes, self.image_h, self.image_w, self.input_h, self.input_w)
-        # suppress non-maximal boxes
-        Yolov3Validator.do_nms(boxes, 0.5)
+            np.testing.assert_allclose(outputs[i], refs[i], rtol=1e-2, atol=1e-2)
 
-        # get the details of the detected objects
-        v_boxes, v_labels, v_scores = Yolov3Validator.get_boxes(boxes, self.labels, class_threshold)
-
-        # summarize what we found
-        for i in range(len(v_boxes)):
-            print(v_labels[i], v_scores[i])
-        
-        assert all(["truck" in v_labels, "bicycle" in v_labels, "dog" in v_labels]), "Failed Yolov3 validation check"
-
-        if show:
-            # draw what we found
-           Yolov3Validator.draw_boxes(self.image_fn, v_boxes, v_labels, v_scores)
 
 class Executor(object):
     def __init__(self, use_tracker=False):
@@ -1018,22 +1140,28 @@ class Executor(object):
         self.remote = None
         self.tracker = None
 
-    def advanced_time_evaluator(self, m, func_name, ctx, number=1, repeat=1, min_repeat_ms=0, time_to_work_ms=0, cooldown_interval_ms=0, f_preproc=""):
+    def advanced_time_evaluator(self, m, func_name, ctx, number=1, repeat=1, min_repeat_ms=0, time_to_work_ms=0, cooldown_interval_ms=0, f_preproc="", mod_func_name=None):
         import inspect
         import math
-        def ms_to_s(ms): 
+        def ms_to_s(ms):
             return ms / 1000
-        one_run_time = m.module.time_evaluator(func_name, ctx, number=1,repeat=1,min_repeat_ms=0)().results[0]
+        if mod_func_name is None:
+            one_run_time = m.module.time_evaluator(func_name, ctx, number=1,repeat=1,min_repeat_ms=0)().results[0]
+        else:
+            one_run_time = m.module.time_evaluator(func_name, ctx, number=1,repeat=1,min_repeat_ms=0)(mod_func_name).results[0]
         repeats_to_cooldown = max(round(ms_to_s(time_to_work_ms)/one_run_time), 1)
 
         def _time_evaluator(func_name, m, ctx, number=1, repeat=1, min_repeat_ms=0, cooldown_interval_ms=0, repeats_to_cooldown=1, f_preproc=""):
-            def evaluator():
+            def evaluator(mod_func_name):
                 import time
                 from tvm.runtime.module import BenchmarkResult
                 results = []
                 for _ in range(math.ceil(repeat / repeats_to_cooldown)):
                     time_f = m.module.time_evaluator(func_name, ctx, number=number, repeat=repeats_to_cooldown, min_repeat_ms=min_repeat_ms, f_preproc=f_preproc)
-                    results.append(time_f().results)
+                    if mod_func_name is None:
+                        results.append(time_f().results)
+                    else:
+                        results.append(time_f(mod_func_name).results)
                     time.sleep(ms_to_s(cooldown_interval_ms))
                 return BenchmarkResult([np.mean(r) for r in results])
             return evaluator
@@ -1042,7 +1170,7 @@ class Executor(object):
             time_f = m.module.time_evaluator(func_name, ctx, number=number, repeat=repeat, min_repeat_ms=min_repeat_ms, cooldown_interval_ms=cooldown_interval_ms, repeats_to_cooldown=repeats_to_cooldown, f_preproc=f_preproc)
         else:
             time_f = _time_evaluator(func_name, m, ctx, number=number, repeat=repeat, min_repeat_ms=min_repeat_ms, cooldown_interval_ms=cooldown_interval_ms, repeats_to_cooldown=repeats_to_cooldown, f_preproc=f_preproc)
-            
+
         return time_f
 
     def check_distribution(self, y, tolerance=0.05, show_plot=False):
@@ -1159,17 +1287,125 @@ class Executor(object):
             print("Validation done")
 
 
+    def _benchmark_vm(
+        self,
+        tvm_mod,
+        params,
+        input_shape,
+        target="llvm",
+        target_host="llvm",
+        dtype="float32",
+        validator=None
+    ):
+        from tvm.runtime.vm import VirtualMachine
+        from tvm.runtime import profiler_vm
+        
+        if self.use_tracker and self.remote == None:
+            self._connect_tracker()
+
+        if isinstance(tvm_mod, tvm.IRModule):
+            mod = tvm_mod
+        else:
+            mod = tvm.IRModule()
+            mod["main"] = tvm_mod
+
+        with tvm.transform.PassContext(opt_level=3):
+            vmc = relay.vm.compile(mod, target_host=target_host, target=target, params=params)
+
+        if self.remote:
+            print("Using Android OpenCL runtime over RPC")
+            temp = utils.tempdir()
+            dso_binary = "dev_lib_cl.so"
+            dso_binary_path = temp.relpath(dso_binary)
+            if "opencl" in target:
+                ctx = self.remote.cl(0)
+            else:
+                ctx = self.remote.cpu(0)
+            vmc.mod.export_library(dso_binary_path, ndk.create_shared)
+            self.remote.upload(dso_binary_path)
+            print("Uploading binary...")
+            rlib = self.remote.load_module(dso_binary)
+            if args.debug:
+                vm = tvm.runtime.profiler_vm.VirtualMachineProfiler(rlib, ctx, "naive")
+            else:
+                vm = VirtualMachine(rlib, ctx, "naive")
+        else:
+            print("Using local runtime")
+            ctx = tvm.device(target, 0)
+            if args.debug:
+                vm = tvm.runtime.profiler_vm.VirtualMachineProfiler(vmc, ctx, "naive")
+            else:
+                vm = VirtualMachine(vmc, ctx, "naive")
+        inputs = []
+        if isinstance(validator, Validator):
+            inputs = validator.GetInputDictionary()
+            data = {}
+            for k, v in inputs.items():
+                data[k] = tvm.nd.array(v, ctx)
+            vm.set_input("main", **data)
+        elif isinstance(input_shape, dict):
+            data = {}
+            for key in input_shape:
+                data[key] = tvm.nd.array(np.random.normal(size=input_shape[key]).astype("float32"), ctx)
+            vm.set_input("main", **data)
+        else:
+            data = tvm.nd.array(np.random.normal(size=input_shape).astype("float32"), ctx)
+            vm.set_input("main", data)
+        
+        print("Evaluating...", flush=True)
+        if args.debug:
+            res = vm.profile(**data, func_name="main")
+            print(res)
+        
+        number = 1
+        repeat = 100
+        min_repeat_ms = 0
+        time_to_work_ms = 1000
+        cooldown_interval_ms=1000
+        time_f = self.advanced_time_evaluator(vm, "invoke_stateful", ctx, number, repeat, min_repeat_ms, time_to_work_ms, cooldown_interval_ms, mod_func_name="main")
+
+        benchmarkResult = time_f("main")
+        cost = benchmarkResult.mean
+        print("%g secs/iteration\n" % cost)
+        print(benchmarkResult)
+
+        if validator:
+            if isinstance(validator, Validator):
+                ref_outputs = validator.GetReference()
+                validator.Validate(vm, ref_outputs, data)
+            else:
+                ref_outputs = validator(inputs)
+                for i, ref_output in enumerate(ref_outputs):
+                    tvm_output = vm.get_outputs(i)
+                    output = tvm_output.asnumpy()
+                    np.testing.assert_allclose(output, ref_output, rtol=1e-3, atol=1e-3)
+            print("Validation done")
+
+
     def _schedule_jobs(self, mod, params, input_shape, dtype, target, validator=None):
-        def bench():
-            self._benchmark(
-                mod,
-                params,
-                input_shape,
-                target=target,
-                target_host=self.host_target,
-                dtype=dtype,
-                validator=validator
-            )
+        if args.VM:
+            def bench():
+                self._benchmark_vm(
+                    mod,
+                    params,
+                    input_shape,
+                    target=target,
+                    target_host=self.host_target,
+                    dtype=dtype,
+                    validator=validator
+                )
+        else:
+            def bench():
+                self._benchmark(
+                    mod,
+                    params,
+                    input_shape,
+                    target=target,
+                    target_host=self.host_target,
+                    dtype=dtype,
+                    validator=validator
+                )
+        
 
         benchmark_index = len(self.benchmarks)
         self.benchmarks.append(bench)

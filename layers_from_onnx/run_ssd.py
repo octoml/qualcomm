@@ -11,9 +11,9 @@ class TestConv2dResNet50():
     def __init__(self):
         self.target_host = "llvm -mtriple=arm64-linux-android"
         self.target = "opencl --device=adreno"
-        self.rpc_key = "android"
+        self.rpc_key = "android2"
         self.rpc_tracker_host = "0.0.0.0"
-        self.rpc_tracker_port = 9190
+        self.rpc_tracker_port = 9191
 
         self.dtype = "float32"
         self.stat_file = f"resnet_{self.dtype}.autotvm.log"
@@ -28,8 +28,8 @@ class TestConv2dResNet50():
             ((1, 128, 150, 150), (128, 128, 3, 3), (1, 1, 1, 1), (1, 1), 0),
             ((1, 128, 150, 150), (256, 128, 3, 3), (1, 1, 1, 1), (1, 1), 1),
             ((1, 128, 150, 150), (256, 128, 1, 1), (0, 0, 0, 0), (1, 1), 0),
-            # ((1, 256, 150, 150), (256, 256, 3, 3), (1, 1, 1, 1), (1, 1), 1),
-            # ((1, 256, 150, 150), (256, 256, 3, 3), (1, 1, 1, 1), (1, 1), 0),
+            ((1, 256, 150, 150), (256, 256, 3, 3), (1, 1, 1, 1), (1, 1), 1),
+            ((1, 256, 150, 150), (256, 256, 3, 3), (1, 1, 1, 1), (1, 1), 0),
         ]
 
         self.layers_data_bias_add = [
@@ -61,7 +61,33 @@ class TestConv2dResNet50():
             ((1, 15130, 81), (1, 80, 15130), 200, 0.5, 0.05)
         ]
     
+    def advanced_time_evaluator(self, m, func_name, ctx, number=1, repeat=1, min_repeat_ms=0, time_to_work_ms=0, cooldown_interval_ms=0, f_preproc=""):
+        import inspect
+        import math
+        def ms_to_s(ms): 
+            return ms / 1000
+        one_run_time = m.module.time_evaluator(func_name, ctx, number=1,repeat=1,min_repeat_ms=0)().results[0]
+        repeats_to_cooldown = max(round(ms_to_s(time_to_work_ms)/one_run_time), 1)
 
+        def _time_evaluator(func_name, m, ctx, number=1, repeat=1, min_repeat_ms=0, cooldown_interval_ms=0, repeats_to_cooldown=1, f_preproc=""):
+            def evaluator():
+                import time
+                from tvm.runtime.module import BenchmarkResult
+                results = []
+                for _ in range(math.ceil(repeat / repeats_to_cooldown)):
+                    time_f = m.module.time_evaluator(func_name, ctx, number=number, repeat=repeats_to_cooldown, min_repeat_ms=min_repeat_ms, f_preproc=f_preproc)
+                    results.append(time_f().results)
+                    time.sleep(ms_to_s(cooldown_interval_ms))
+                return BenchmarkResult([np.mean(r) for r in results])
+            return evaluator
+
+        if inspect.signature(m.module.time_evaluator).parameters.get("cooldown_interval_ms"):
+            time_f = m.module.time_evaluator(func_name, ctx, number=number, repeat=repeat, min_repeat_ms=min_repeat_ms, cooldown_interval_ms=cooldown_interval_ms, repeats_to_cooldown=repeats_to_cooldown, f_preproc=f_preproc)
+        else:
+            time_f = _time_evaluator(func_name, m, ctx, number=number, repeat=repeat, min_repeat_ms=min_repeat_ms, cooldown_interval_ms=cooldown_interval_ms, repeats_to_cooldown=repeats_to_cooldown, f_preproc=f_preproc)
+            
+        return time_f
+    
     def generate_model_bn(self, dtype, input_shape, filter_shape, padding, strides, relu):
         input = tvm.relay.var("input", shape=input_shape, dtype=dtype)
         weight = tvm.relay.var("weight", shape=filter_shape, dtype=dtype)
@@ -246,14 +272,37 @@ class TestConv2dResNet50():
         module.set_input("input", inp)
         print("Evaluating...", flush=True)
         number = 1
-        repeat = 50
-        module.run(number=number, repeat=repeat)
+        repeat = 100
+        min_repeat_ms = 0
+        time_to_work_ms = 1000
+        cooldown_interval_ms=1000
+        module.run()
+        time_f = self.advanced_time_evaluator(module, "run", dev, number, repeat, min_repeat_ms, time_to_work_ms, cooldown_interval_ms)
+        benchmarkResult = time_f()
+        cost = benchmarkResult.mean
+        print("%g secs/iteration\n" % cost)
+        cost_ms = cost * 1000
+        print(f"{cost_ms} ms/iteration\n")
     
-    def run_module_nms(self, module, dtype):
+    def run_module_nms(self, module, params, boxes_shape, dev):
+        module.set_input(**params)
+        inp = np.random.normal(size=boxes_shape).astype("float32")
+        module.set_input("boxes", inp)
+        print("inp", inp, flush=True)
+        print("inp len", len(inp), flush=True)
         print("Evaluating...", flush=True)
         number = 1
-        repeat = 50
-        module.run(number=number, repeat=repeat)
+        repeat = 100
+        min_repeat_ms = 0
+        time_to_work_ms = 1000
+        cooldown_interval_ms=1000
+        module.run()
+        time_f = self.advanced_time_evaluator(module, "run", dev, number, repeat, min_repeat_ms, time_to_work_ms, cooldown_interval_ms)
+        benchmarkResult = time_f()
+        cost = benchmarkResult.mean
+        print("%g secs/iteration\n" % cost)
+        cost_ms = cost * 1000
+        print(f"{cost_ms} ms/iteration\n")
 
 
     def kill(self):
@@ -261,13 +310,13 @@ class TestConv2dResNet50():
         del self.tracker
 
     def test_tune(self):
-        # for input_shape, filter_shape, workload_padding, strides, relu in self.layers_data_bn:
-        #     mod, params = self.generate_model_bn(self.dtype, input_shape, filter_shape, workload_padding, strides, relu)
-        #     self.tune_model(mod, params)
+        for input_shape, filter_shape, workload_padding, strides, relu in self.layers_data_bn:
+            mod, params = self.generate_model_bn(self.dtype, input_shape, filter_shape, workload_padding, strides, relu)
+            self.tune_model(mod, params)
         
-        # for input_shape, filter_shape, workload_padding, strides, relu in self.layers_data_bias_add:
-        #     mod, params = self.generate_model_bias_add(self.dtype, input_shape, filter_shape, workload_padding, strides, relu)
-        #     self.tune_model(mod, params)
+        for input_shape, filter_shape, workload_padding, strides, relu in self.layers_data_bias_add:
+            mod, params = self.generate_model_bias_add(self.dtype, input_shape, filter_shape, workload_padding, strides, relu)
+            self.tune_model(mod, params)
         
         for boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold in self.nms_data:
             mod, params = self.generate_model_nms(boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold)
@@ -278,7 +327,7 @@ class TestConv2dResNet50():
             mod, params = self.generate_model_bn(self.dtype, input_shape, filter_shape, workload_padding, strides, relu)
             self.connect_tracker()
             graph, lib, params = self.build_model_with_stat(mod, params, self.stat_file)
-            rlib, module, dev = self.create_module(graph, lib, debug=True)
+            rlib, module, dev = self.create_module(graph, lib, debug=False)
             self.run_module(module, params, input_shape, self.dtype, dev)
             del dev
             del module
@@ -289,7 +338,7 @@ class TestConv2dResNet50():
             mod, params = self.generate_model_bias_add(self.dtype, input_shape, filter_shape, workload_padding, strides, relu)
             self.connect_tracker()
             graph, lib, params = self.build_model_with_stat(mod, params, self.stat_file)
-            rlib, module, dev = self.create_module(graph, lib, debug=True)
+            rlib, module, dev = self.create_module(graph, lib, debug=False)
             self.run_module(module, params, input_shape, self.dtype, dev)
             del dev
             del module
@@ -300,15 +349,15 @@ class TestConv2dResNet50():
             mod, params = self.generate_model_nms(boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold)
             self.connect_tracker()
             graph, lib, params = self.build_model_with_stat(mod, params, self.stat_file)
-            rlib, module, dev = self.create_module(graph, lib, debug=True)
-            self.run_module_nms(module, self.dtype)
+            rlib, module, dev = self.create_module(graph, lib, debug=False)
+            self.run_module_nms(module, params, boxes_shape, dev)
             del dev
             del module
             del rlib
             self.kill()
     
     def run_full(self):
-        # self.test_tune()
+        #self.test_tune()
         self.test_run()
 
 
