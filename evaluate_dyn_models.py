@@ -11,7 +11,7 @@ from common import convert_to_dtype, advanced_time_evaluator
 import argparse
 
 def get_args():
-    models = ['ssd', 'yolov3', 'faster']
+    models = ['onnx_ssd_resnet34', 'onnx_yolo_v3', 'onnx_faster_rcnn']
 
     parser = argparse.ArgumentParser(
         description="Tune and/or evaluate a curated set of models"
@@ -100,7 +100,7 @@ def get_args():
 
 args = get_args()
 
-def ssd_layers():
+def onnx_ssd_resnet34_layers():
     batch_norm = [
         ((1, 3, 1200, 1200), (64, 3, 7, 7), (3, 3, 3, 3), (2, 2), 1),
         ((1, 64, 300, 300), (64, 64, 3, 3), (1, 1, 1, 1), (1, 1), 1),
@@ -144,7 +144,7 @@ def ssd_layers():
     ]
     return batch_norm, bias_add, nms
     
-def yolov3_layers():
+def onnx_yolo_v3_layers():
     batch_norm = [
         ((1, 3, 416, 416), (32, 3, 3, 3), (1, 1, 1, 1), (1, 1), 1),
         ((1, 32, 416, 416), (64, 32, 3, 3), (1, 1, 0, 0), (2, 2), 1),
@@ -179,7 +179,7 @@ def yolov3_layers():
     ]
     return batch_norm, bias_add, nms
     
-def faster_layers():
+def onnx_faster_rcnn_layers():
     batch_norm = [
         ((1, 3, 1200, 1200), (64, 3, 7, 7), (3, 3, 3, 3), (2, 2), 1),
         
@@ -565,12 +565,12 @@ def build_and_evaluate(batch_norm, bias_add, nms):
 def run_full():
     if args.rpc_tracker_port != None:
         args.rpc_tracker_port = int(args.rpc_tracker_port)
-    if args.model == 'ssd':
-        batch_norm, bias_add, nms = ssd_layers()
-    elif args.model == 'yolov3':
-        batch_norm, bias_add, nms = yolov3_layers()
-    elif args.model == 'faster':
-        batch_norm, bias_add, nms = faster_layers()
+    if args.model == 'onnx_ssd_resnet34':
+        batch_norm, bias_add, nms = onnx_ssd_resnet34_layers()
+    elif args.model == 'onnx_yolo_v3':
+        batch_norm, bias_add, nms = onnx_yolo_v3_layers()
+    elif args.model == 'onnx_faster_rcnn':
+        batch_norm, bias_add, nms = onnx_faster_rcnn_layers()
     if args.tune:
         tune_model(batch_norm, bias_add, nms)
     build_and_evaluate(batch_norm, bias_add, nms)

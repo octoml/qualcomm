@@ -299,7 +299,8 @@ class ModelImporter(object):
         mod = convert_to_dtype(mod["main"], dtype)
         dtype = "float32" if dtype == "float32" else "float16"
 
-        return (mod, params, shape_dict, dtype, target, ONNXTestSamplesValidator(test_files_dir, input_names=list(shape_dict.keys())))
+        #return (mod, params, shape_dict, dtype, target, ONNXTestSamplesValidator(test_files_dir, input_names=list(shape_dict.keys())))
+        return (mod, params, shape_dict, dtype, target, SSDResnetValidator())
 
 
     def import_onnx_yolo_v3(self, target="llvm", dtype="float32"):
@@ -330,10 +331,29 @@ class ModelImporter(object):
         print(mod)
         print("=" * 10)
 
-        return (mod, params, shape_dict, dtype, target, ONNXTestSamplesValidator(test_files_dir, input_names=list(shape_dict.keys())))
+        return (mod, params, shape_dict, dtype, target, ONNXYolov3Validator())
+        #return (mod, params, shape_dict, dtype, target, ONNXTestSamplesValidator(test_files_dir, input_names=list(shape_dict.keys())))
 
 
     def import_onnx_faster_rcnn(self, target="llvm", dtype="float32"):
+        min_shape = 800.0
+        def _get_shape():
+            from PIL import Image
+            from tvm.contrib import download
+            # Download test image
+            image_url = "https://raw.githubusercontent.com/zhreshold/mxnet-ssd/master/data/demo/dog.jpg"
+            image_fn = "dog.png"
+            image_url = "https://raw.githubusercontent.com/onnx/models/main/vision/object_detection_segmentation/faster-rcnn/dependencies/demo.jpg"
+            image_fn = "demo.png"
+            download.download(image_url, image_fn)
+
+            # Prepare test image for inference
+            #import ipdb; ipdb.set_trace()
+            image = Image.open(image_fn)
+            print(image.size)
+            ratio = min_shape / min(image.size[0], image.size[1])
+            #return (3, int(ratio * image.size[1]), int(ratio * image.size[0])) # [c, h, w]
+            return (3, int(min_shape), int(min_shape)) # [c, h, w]
         archive_url = "https://github.com/onnx/models/raw/main/vision/object_detection_segmentation/faster-rcnn/model/FasterRCNN-12.onnx"
         filename = "FasterRCNN-12"
         from tvm.contrib import download
@@ -341,10 +361,10 @@ class ModelImporter(object):
         download.download(archive_url, filename)
         onnx_model = onnx.load(filename)
         shape_dict = {
-            "image": (3, 800, 800),
+            "image": _get_shape(),
         }
-        mod_file = "onnx_faster_rcnn_mod.json"
-        params_file = "onnx_faster_rcnn_params.json"
+        mod_file = f"onnx_faster_rcnn_mod_{dtype}.json"
+        params_file = f"onnx_faster_rcnn_params_{dtype}.json"
         if not os.path.exists(mod_file):
             mod, params = relay.frontend.from_onnx(onnx_model, shape_dict, freeze_params=True)
 
@@ -366,7 +386,7 @@ class ModelImporter(object):
         print(mod)
         print("=" * 10)
 
-        return (mod, params, shape_dict, dtype, target)
+        return (mod, params, shape_dict, dtype, target, FasterRCNNValidator(min_shape))
 
 
 def get_args():
@@ -675,7 +695,7 @@ class ImageNetValidator(Validator):
         else:
             tvm_output = m.get_output(0)
         #import ipdb; ipdb.set_trace()
-        top_categories = np.argsort(tvm_output.asnumpy()[0])  # TODO: top_categories = np.argsort(tvm_output.asnumpy()[0]) AttributeError: 'NoneType' object has no attribute 'asnumpy'
+        top_categories = np.argsort(tvm_output.asnumpy()[0])
         # Report top-5 classification results
         print("\nTop5 predictions: \n")
         top5 = np.flip(top_categories, axis=0)[:5]
@@ -1043,6 +1063,218 @@ class ONNXTestSamplesValidator(Validator):
             np.testing.assert_allclose(outputs[i], refs[i], rtol=1e-2, atol=1e-2)
 
 
+class FasterRCNNValidator(Validator):
+    def preprocess(self, image):
+        from PIL import Image
+        # Resize
+        ratio = self.min_shape / min(image.size[0], image.size[1])
+        #image = image.resize((int(ratio * image.size[0]), int(ratio * image.size[1])), Image.BILINEAR)
+        image = image.resize((int(self.min_shape), int(self.min_shape)), Image.BILINEAR)
+
+        # Convert to BGR
+        image = np.array(image)[:, :, [2, 1, 0]].astype('float32')
+
+        # HWC -> CHW
+        image = np.transpose(image, [2, 0, 1])
+
+        # Normalize
+        mean_vec = np.array([102.9801, 115.9465, 122.7717])
+        for i in range(image.shape[0]):
+            image[i, :, :] = image[i, :, :] - mean_vec[i]
+
+        # Pad to be divisible of 32
+        import math
+        padded_h = int(math.ceil(image.shape[1] / 32) * 32)
+        padded_w = int(math.ceil(image.shape[2] / 32) * 32)
+
+        padded_image = np.zeros((3, padded_h, padded_w), dtype=np.float32)
+        padded_image[:, :image.shape[1], :image.shape[2]] = image
+        image = padded_image
+
+        return image
+
+    def __init__(self, min_shape, preproc=None):
+        from PIL import Image
+        from tvm.contrib import download
+        from os.path import join, isfile
+        from matplotlib import pyplot as plt
+        self.min_shape = min_shape
+
+        # Download test image
+        image_url = "https://raw.githubusercontent.com/zhreshold/mxnet-ssd/master/data/demo/dog.jpg"
+        image_fn = "dog.png"
+        download.download(image_url, image_fn)
+
+        # Prepare test image for inference
+        #import ipdb; ipdb.set_trace()
+        self.image = Image.open(image_fn)
+        image_data = self.preprocess(self.image)
+
+        self.inputs = {"image" : image_data}
+
+    def Validate(self, m, ref_outputs=[]):
+        from tvm.contrib import download
+        classes_url = "https://raw.githubusercontent.com/onnx/models/main/vision/object_detection_segmentation/faster-rcnn/dependencies/coco_classes.txt"
+        classes_fn = "coco_classes_faster.txt"
+        download.download(classes_url, classes_fn)
+        classes = [line.rstrip('\n') for line in open(classes_fn)]
+
+        # class_IDs, scores, bounding_boxs
+        if isinstance(m, tvm.runtime.vm.VirtualMachine) or isinstance(m, tvm.runtime.profiler_vm.VirtualMachineProfiler):
+            tvm_output = m.get_outputs()
+            boxes = tvm_output[0].asnumpy()
+            labels = tvm_output[1].asnumpy()
+            scores = tvm_output[2].asnumpy()
+        else:
+            boxes = m.get_output(0).asnumpy()
+            labels = m.get_output(1).asnumpy()
+            scores = m.get_output(2).asnumpy()
+        score_threshold = 0.7
+        assert boxes.shape[0] == labels.shape[0] and labels.shape[0] == scores.shape[0]
+        #for box, label, score in zip(boxes, labels, scores):
+        for i in range(len(boxes)):
+            if scores[i] > score_threshold:
+                print("label: {}, score: {}, box: {}".format(classes[labels[i]], scores[i], boxes[i]))
+                #assert classes[labels[i]] == 'dog' or classes[labels[i]] == 'bicycle'
+
+
+class SSDResnetValidator(Validator):
+    def preprocess(self, image):
+        from PIL import Image
+        img = image.resize((1200, 1200), Image.BILINEAR)
+        img_data = np.array(img)
+        img_data = np.transpose(img_data, [2, 0, 1])
+        img_data = np.expand_dims(img_data, 0)
+        mean_vec = np.array([0.485, 0.456, 0.406])
+        stddev_vec = np.array([0.229, 0.224, 0.225])
+        norm_img_data = np.zeros(img_data.shape).astype('float32')
+        for i in range(img_data.shape[1]):
+            norm_img_data[:,i,:,:] = (img_data[:,i,:,:]/255 - mean_vec[i]) / stddev_vec[i]
+        return norm_img_data
+
+    def __init__(self, preproc=None):
+        from PIL import Image
+        from tvm.contrib import download
+        from os.path import join, isfile
+        from matplotlib import pyplot as plt
+
+        # Download test image
+        image_url = "https://raw.githubusercontent.com/zhreshold/mxnet-ssd/master/data/demo/dog.jpg"
+        image_fn = "dog.png"
+        download.download(image_url, image_fn)
+
+        # Prepare test image for inference
+        #import ipdb; ipdb.set_trace()
+        self.image = Image.open(image_fn)
+        image_data = self.preprocess(self.image)
+
+        self.inputs = {"image" : image_data}
+
+    def Validate(self, m, ref_outputs=[]):
+        from tvm.contrib import download
+        classes_url = "https://raw.githubusercontent.com/onnx/models/main/vision/object_detection_segmentation/faster-rcnn/dependencies/coco_classes.txt"
+        classes_fn = "coco_classes_resnet.txt"
+        download.download(classes_url, classes_fn)
+        classes = [line.rstrip('\n') for line in open(classes_fn)]
+
+        # class_IDs, scores, bounding_boxs
+        if isinstance(m, tvm.runtime.vm.VirtualMachine) or isinstance(m, tvm.runtime.profiler_vm.VirtualMachineProfiler):
+            tvm_output = m.get_outputs()
+            boxes = tvm_output[0].asnumpy()
+            labels = tvm_output[1].asnumpy()
+            scores = tvm_output[2].asnumpy()
+        else:
+            boxes = m.get_output(0).asnumpy()
+            labels = m.get_output(1).asnumpy()
+            scores = m.get_output(2).asnumpy()
+        score_threshold = 0.7
+        for i in range(len(boxes)):
+            if scores[0][i] > score_threshold:
+                print("label: {}, score: {}, box: {}".format(classes[labels[0][i]], scores[0][i], boxes[0][i]))
+                assert classes[labels[0][i]] == 'dog' or classes[labels[0][i]] == 'bicycle'
+
+
+class ONNXYolov3Validator(Validator):
+    def preprocess(self, img):
+        #from PIL import Image
+        def _letterbox_image(image, size):
+            from PIL import Image
+            '''resize image with unchanged aspect ratio using padding'''
+            iw, ih = image.size
+            w, h = size
+            scale = min(w/iw, h/ih)
+            nw = int(iw*scale)
+            nh = int(ih*scale)
+
+            image = image.resize((nw,nh), Image.BICUBIC)
+            new_image = Image.new('RGB', size, (128,128,128))
+            new_image.paste(image, ((w-nw)//2, (h-nh)//2))
+            return new_image
+
+        model_image_size = (416, 416)
+        boxed_image = _letterbox_image(img, tuple(reversed(model_image_size)))
+        #boxed_image = img.resize(model_image_size, Image.BICUBIC)
+        image_data = np.array(boxed_image, dtype='float32')
+        image_data /= 255.
+        image_data = np.transpose(image_data, [2, 0, 1])
+        image_data = np.expand_dims(image_data, 0)
+        return image_data
+
+    def __init__(self, preproc=None):
+        from PIL import Image
+        from tvm.contrib import download
+        from os.path import join, isfile
+        from matplotlib import pyplot as plt
+
+        # Download test image
+        image_url = "https://raw.githubusercontent.com/zhreshold/mxnet-ssd/master/data/demo/dog.jpg"
+        image_fn = "dog.png"
+        download.download(image_url, image_fn)
+
+        # Prepare test image for inference
+        #import ipdb; ipdb.set_trace()
+        self.image = Image.open(image_fn)
+        image_data = self.preprocess(self.image)
+        image_size = np.array([self.image.size[1], self.image.size[0]], dtype="float32").reshape(1, 2)
+
+        self.inputs = {
+            "input_1" : image_data,
+            "image_shape" : image_size,
+        }
+
+    def Validate(self, m, ref_outputs=[]):
+        from tvm.contrib import download
+        classes_url = "https://raw.githubusercontent.com/qqwweee/keras-yolo3/master/model_data/coco_classes.txt"
+        #classes_url = "https://raw.githubusercontent.com/onnx/models/main/vision/object_detection_segmentation/faster-rcnn/dependencies/coco_classes.txt"
+        classes_fn = "coco_classes.txt"
+        download.download(classes_url, classes_fn)
+        classes = [line.rstrip('\n') for line in open(classes_fn)]
+
+        # class_IDs, scores, bounding_boxs
+        if isinstance(m, tvm.runtime.vm.VirtualMachine) or isinstance(m, tvm.runtime.profiler_vm.VirtualMachineProfiler):
+            tvm_output = m.get_outputs()
+            boxes = tvm_output[0].asnumpy()
+            scores = tvm_output[1].asnumpy()
+            indices = tvm_output[2].asnumpy()
+        else:
+            boxes = m.get_output(0).asnumpy()
+            scores = m.get_output(1).asnumpy()
+            indices = m.get_output(2).asnumpy()
+        score_threshold = 0.7
+        print(boxes.shape)
+        print(scores.shape)
+        print(indices.shape)
+        for idx_ in indices:
+            class_idx = idx_[1]
+            score = scores[tuple(idx_)]
+            idx_1 = (idx_[0], idx_[2])
+            box = boxes[idx_1]
+            possible_objs = ['dog', 'bicycle', 'truck']
+            if score > score_threshold and score <= 100:
+                print("label: {}, score: {}, box: {}".format(classes[class_idx], score, box))
+                assert classes[class_idx] in possible_objs
+
+
 class Executor(object):
     def __init__(self, use_tracker=False):
         self.benchmarks = []
@@ -1330,11 +1562,11 @@ class Executor(object):
         self.benchmarks.append(bench)
 
         def tune(apply_previous_tune=False, options=args.tuning_options):
-            print("Extracting tasks")
-            tasks = autotvm.task.extract_from_program(
-                mod, target=target, target_host=self.host_target, params=params
-            )
             if apply_previous_tune == False:
+                print("Extracting tasks")
+                tasks = autotvm.task.extract_from_program(
+                    mod, target=target, target_host=self.host_target, params=params
+                )
                 print("Tuning kernels")
                 Executor.tune_tasks(tasks, **options)
 

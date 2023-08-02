@@ -30,16 +30,32 @@ python ./evaluate.py -m mace_mobilenetv1_nchw -t float32 -k android --target="op
 ```
 Refer to the below instructions for running the `scripts/evaluate.py` script for more information
 
-Additionaly, the script `evaluate_dyn_models.py` could be used to tune and evaluate layers from dynamic models (ssd-resnet, yolov3, faster-rcnn). Below, you can see examples of ssd-resnet evaluation with SD 8 Gen 1 statistics:
+## Run models with dynamic shape through VM
+In the table below you can see the performance numbers for a set of models from Onnx model zoo which were achieved on the `Qualcomm Snapdragon 8 Gen 1`:
+
+|                  |   onnx_ssd_resnet34   |   onnx_yolo_v3   | onnx_faster_rcnn |   mace_mobilenetv1_nchw  | mace_resnet50_v2 |
+|------------------|-----------------------|------------------|------------------|--------------------------|------------------|
+| TVM FP16    (GE) |                 160,69|             47,38|            203,98|                      3,04|             24,53|
+| TVM FP16    (VM) |                 496,83|             66,44|            208,31|                      3,11|             24,63|
+| TVM FP16a32 (GE) |                      -|                 -|                 -|                         -|                 -|
+| TVM FP16a32 (VM) |                      -|                 -|                 -|                         -|                 -|
+| TVM FP32    (GE) |                 206,97|             70,14|            272,82|                      4,22|             35,46|
+| TVM FP32    (VM) |                 608,26|             95,07|            278,80|                      4,28|             42,43|
+
+Script `evaluate.py` was extended by three models from ONNX model zoo with dynamic shape: [onnx_ssd_resnet34](https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/ssd), [onnx_yolo_v3](https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/yolov3) and [onnx_faster_rcnn](https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/faster-rcnn). They can be inferred by using the following names of the models: `onnx_ssd_resnet34`, `onnx_yolo_v3` and `onnx_faster_rcnn`.
+
+These models can not be executed by GE, so it is necessary to pass additioal argument to `evaluate.py`: `--VM`, that means that the model should be inferred by using VM.
+
+Additionaly, the script `evaluate_dyn_models.py` could be used to tune and evaluate static layers from dynamic models (`onnx_ssd_resnet34`, `onnx_yolo_v3`, `onnx_faster_rcnn`) with both Graph Executor or Virtual Machine. This script was added to compare VM performance vs GE. Below, you can see examples of `onnx_ssd_resnet34` evaluation with SD 8 Gen 1 statistics:
 ```
 # float16 compute, float16 accumulate
-python ./evaluate_dyn_models.py -m ssd -t float16 -k android --target="opencl --device=adreno" -l ./logs_gen1/resnet_float16.autotvm.log
+python ./evaluate_dyn_models.py -m onnx_ssd_resnet34 -t float16 -k android --target="opencl --device=adreno" -l ./logs_gen1/onnx_ssd_resnet34.float16.acc16.autotvm.log
 
 # float16 compute, float32 accumulate
-python ./evaluate_dyn_models.py -m ssd -t float16_acc32 -k android --target="opencl --device=adreno" -l ./logs_gen1/resnet_float16_acc32.autotvm.log
+python ./evaluate_dyn_models.py -m onnx_ssd_resnet34 -t float16_acc32 -k android --target="opencl --device=adreno" -l ./logs_gen1/onnx_ssd_resnet34.float16.acc32.autotvm.log
 
 # float32 inference
-python ./evaluate_dyn_models.py -m ssd -t float32 -k android --target="opencl --device=adreno" -l ./logs_gen1/resnet_float32.autotvm.log
+python ./evaluate_dyn_models.py -m onnx_ssd_resnet34 -t float32 -k android --target="opencl --device=adreno" -l ./logs_gen1/onnx_ssd_resnet34.float32.autotvm.log
 ```
 
 ## Setting up the host development machine
@@ -126,12 +142,6 @@ Example of evaluation with VM executor:
 $ python3 ./evaluate.py -m mace_mobilenetv1_nchw -t float16 -k android --target="opencl --device=adreno" -l ./logs/mace_mobilenetv1_nchw.texture.float16.acc16.autotvm.log --VM
 ```
 
-Example of debugging with VM executor:
-
-```
-$ python3 ./evaluate.py -m mace_mobilenetv1_nchw -t float16 -k android --target="opencl --device=adreno" -l ./logs/mace_mobilenetv1_nchw.texture.float16.acc16.autotvm.log --VM --debug
-```
-
 ## Using the experiment script 'evaluate_dyn_models.py'
 
 A python script `evaluate_dyn_models.py` can evaluate or tune the layers from a set of dynamic models.
@@ -145,21 +155,14 @@ $ python3 ./evaluate_dyn_models.py -h
 Example of tuning:
 
 ```
-$ python3 ./evaluate_dyn_models.py -m ssd -t float16 -k android --target="opencl --device=adreno" -l ./logs_gen1/resnet_float16.autotvm.log --tune
+$ python3 ./evaluate_dyn_models.py -m ssd -t float16 -k android --target="opencl --device=adreno" -l ./logs_gen1/onnx_ssd_resnet34.float16.acc16.autotvm.log --tune
 ```
 
 Example of evaluation with VM executor:
 
 ```
-$ python3 ./evaluate_dyn_models.py -m ssd -t float16 -k android --target="opencl --device=adreno" -l ./logs_gen1/resnet_float16.autotvm.log --VM
+$ python3 ./evaluate_dyn_models.py -m ssd -t float16 -k android --target="opencl --device=adreno" -l ./logs_gen1/onnx_ssd_resnet34.float16.acc16.autotvm.log --VM
 ```
-
-Example of debugging with VM executor:
-
-```
-$ python3 ./evaluate_dyn_models.py -m ssd -t float16 -k android --target="opencl --device=adreno" -l ./logs_gen1/resnet_float16.autotvm.log --VM --debug
-```
-
 ## Helper applications
 In directory [apps/](apps/) there are two applications which can be used for
 profiling separate OpenCL kernels:
