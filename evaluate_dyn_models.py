@@ -508,7 +508,7 @@ def tune_model(batch_norm, bias_add, nms):
         tune(mod, params)
     
     for boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold in nms:
-        mod, params, input_shape = generate_model_nms(args.dtype, boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold)
+        mod, params, input_shape = generate_model_nms(boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold)
         tune(mod, params)
     
 def build_and_evaluate(batch_norm, bias_add, nms):

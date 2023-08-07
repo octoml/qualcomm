@@ -686,12 +686,9 @@ class ImageNetValidator(Validator):
 
         self.inputs = {name : image}
 
-    def Validate(self, m, ref_outputs=[], data=[]):
+    def Validate(self, m, ref_outputs=[]):
         if isinstance(m, tvm.runtime.vm.VirtualMachine) or isinstance(m, tvm.runtime.profiler_vm.VirtualMachineProfiler):
-            if args.debug:
-                tvm_output = m.invoke("main", **data)
-            else:
-                tvm_output = m.get_outputs()[0]
+            tvm_output = m.get_outputs()[0]
         else:
             tvm_output = m.get_output(0)
         #import ipdb; ipdb.set_trace()
@@ -1476,17 +1473,13 @@ class Executor(object):
             self.remote.upload(dso_binary_path)
             print("Uploading binary...")
             rlib = self.remote.load_module(dso_binary)
-            if args.debug:
-                vm = tvm.runtime.profiler_vm.VirtualMachineProfiler(rlib, ctx, "naive")
-            else:
-                vm = VirtualMachine(rlib, ctx, "naive")
         else:
             print("Using local runtime")
             ctx = tvm.device(target, 0)
-            if args.debug:
-                vm = tvm.runtime.profiler_vm.VirtualMachineProfiler(vmc, ctx, "naive")
-            else:
-                vm = VirtualMachine(vmc, ctx, "naive")
+            rlib = vmc
+        
+        vm = VirtualMachine(rlib, ctx, "naive")
+        
         inputs = []
         if isinstance(validator, Validator):
             inputs = validator.GetInputDictionary()
@@ -1504,9 +1497,6 @@ class Executor(object):
             vm.set_input("main", data)
         
         print("Evaluating...", flush=True)
-        if args.debug:
-            res = vm.profile(**data, func_name="main")
-            print(res)
         
         number = 1
         repeat = 100
@@ -1523,7 +1513,7 @@ class Executor(object):
         if validator:
             if isinstance(validator, Validator):
                 ref_outputs = validator.GetReference()
-                validator.Validate(vm, ref_outputs, data)
+                validator.Validate(vm, ref_outputs)
             else:
                 ref_outputs = validator(inputs)
                 for i, ref_output in enumerate(ref_outputs):
@@ -1531,6 +1521,11 @@ class Executor(object):
                     output = tvm_output.asnumpy()
                     np.testing.assert_allclose(output, ref_output, rtol=1e-3, atol=1e-3)
             print("Validation done")
+
+        if args.debug:
+            vm = tvm.runtime.profiler_vm.VirtualMachineProfiler(rlib, ctx, "naive")
+            res = vm.profile(**data, func_name="main")
+            print(res)
 
 
     def _schedule_jobs(self, mod, params, input_shape, dtype, target, validator=None):
