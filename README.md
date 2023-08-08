@@ -37,10 +37,12 @@ In the table below you can see the performance numbers for a set of models from 
 |------------------|-----------------------|------------------|------------------|--------------------------|------------------|
 | TVM FP16    (GE) |                 160,69|             47,38|            203,98|                      3,04|             24,53|
 | TVM FP16    (VM) |                 496,83|             66,44|            208,31|                      3,11|             24,63|
-| TVM FP16a32 (GE) |                      -|                 -|                 -|                         -|                 -|
-| TVM FP16a32 (VM) |                      -|                 -|                 -|                         -|                 -|
+| TVM FP16a32 (GE) |                 419,32|             83,63|            356,07|                    4,0653|           29,6857|
+| TVM FP16a32 (VM) |                 679,18|             97,99|            361,37|                         -|                 -|
 | TVM FP32    (GE) |                 206,97|             70,14|            272,82|                      4,22|             35,46|
 | TVM FP32    (VM) |                 608,26|             95,07|            278,80|                      4,28|             42,43|
+
+*Virtual Machine has performance degradation only on Non Max Suppression layers, which seems to be a bug, that nevertheless affects the final performance ([issue#15405](https://github.com/apache/tvm/issues/15405)).*
 
 Script `evaluate.py` was extended by three models from ONNX model zoo with dynamic shape: [onnx_ssd_resnet34](https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/ssd), [onnx_yolo_v3](https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/yolov3) and [onnx_faster_rcnn](https://github.com/onnx/models/tree/main/vision/object_detection_segmentation/faster-rcnn). They can be inferred by using the following names of the models: `onnx_ssd_resnet34`, `onnx_yolo_v3` and `onnx_faster_rcnn`.
 
