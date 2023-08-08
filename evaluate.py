@@ -1055,7 +1055,27 @@ class ONNXTestSamplesValidator(Validator):
             with open(input_file, 'rb') as f:
                 tensor.ParseFromString(f.read())
             refs.append(numpy_helper.to_array(tensor))
+        #labels = []
+        #scores_list = []
+        #boxes_list = []
+        #from tvm.contrib import download
+        #classes_url = "https://raw.githubusercontent.com/qqwweee/keras-yolo3/master/model_data/coco_classes.txt"
+        #classes_fn = "coco_classes.txt"
+        #download.download(classes_url, classes_fn)
+        #classes = [line.rstrip('\n') for line in open(classes_fn)]
+        #for idx_ in outputs[2]:
+        #    class_idx = idx_[1]
+        #    score = outputs[1][tuple(idx_)]
+        #    idx_1 = (idx_[0], idx_[2])
+        #    box = outputs[0][idx_1]
+        #    labels.append(classes[class_idx])
+        #    scores_list.append(score)
+        #    boxes_list.append(box)
+        #    print("bigger: label: {}, score: {}, box: {}".format(classes[class_idx], score, box))
 
+        #print(outputs[0].shape)
+        #print(outputs[1].shape)
+        #print(outputs[2].shape)
         for i in range(len(outputs)):
             np.testing.assert_allclose(outputs[i], refs[i], rtol=1e-2, atol=1e-2)
 
