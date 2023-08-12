@@ -229,8 +229,8 @@ def onnx_faster_rcnn_layers():
     ]
     return batch_norm, bias_add, nms
     
-def generate_model_bn(dtype, input_shape, filter_shape, padding, strides, relu, leaky=False):
-    dtype = "float32"
+def generate_model_bn(input_shape, filter_shape, padding, strides, relu, leaky=False):
+    dtype = "float16" if args.dtype == "float16" else "float32"
     shape_dict = {
         "input": input_shape,
         "weight": filter_shape,
@@ -265,11 +265,10 @@ def generate_model_bn(dtype, input_shape, filter_shape, padding, strides, relu, 
     module = tvm.IRModule({})
     module["main"] = mod
     module = convert_to_dtype(module["main"], args.dtype)
-    dtype = "float32" if args.dtype == "float32" else "float16"
-    return module, params, shape_dict, dtype
+    return module, params, shape_dict
 
-def generate_model_bias_add(dtype, input_shape, filter_shape, padding, strides, relu):
-    dtype = "float32"
+def generate_model_bias_add(input_shape, filter_shape, padding, strides, relu):
+    dtype = "float16" if args.dtype == "float16" else "float32"
     bias_shape = (filter_shape[0],)
     shape_dict = {
         "input": input_shape,
@@ -293,8 +292,7 @@ def generate_model_bias_add(dtype, input_shape, filter_shape, padding, strides, 
     module = tvm.IRModule({})
     module["main"] = mod
     module = convert_to_dtype(module["main"], args.dtype)
-    dtype = "float32" if args.dtype == "float32" else "float16"
-    return module, params, shape_dict, dtype
+    return module, params, shape_dict
 
 def generate_model_nms(boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold):
     shape_dict = {
@@ -500,11 +498,11 @@ def connect_tracker():
     
 def tune_model(batch_norm, bias_add, nms):
     for input_shape, filter_shape, workload_padding, strides, relu in batch_norm:
-        mod, params, input_shape, _ = generate_model_bn(args.dtype, input_shape, filter_shape, workload_padding, strides, relu)
+        mod, params, input_shape = generate_model_bn(input_shape, filter_shape, workload_padding, strides, relu)
         tune(mod, params)
     
     for input_shape, filter_shape, workload_padding, strides, relu in bias_add:
-        mod, params, input_shape, _ = generate_model_bias_add(args.dtype, input_shape, filter_shape, workload_padding, strides, relu)
+        mod, params, input_shape = generate_model_bias_add(input_shape, filter_shape, workload_padding, strides, relu)
         tune(mod, params)
     
     for boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold in nms:
@@ -512,8 +510,9 @@ def tune_model(batch_norm, bias_add, nms):
         tune(mod, params)
     
 def build_and_evaluate(batch_norm, bias_add, nms):
+    dtype = "float16" if args.dtype == "float16" else "float32"
     for input_shape, filter_shape, workload_padding, strides, relu in batch_norm:
-        mod, params, shape_dict, dtype = generate_model_bn(args.dtype, input_shape, filter_shape, workload_padding, strides, relu)
+        mod, params, shape_dict = generate_model_bn(input_shape, filter_shape, workload_padding, strides, relu)
         input_dict = {}
         for k, v in shape_dict.items():
             img = np.random.rand(*v).astype(dtype)
@@ -528,7 +527,7 @@ def build_and_evaluate(batch_norm, bias_add, nms):
         del remote
 
     for input_shape, filter_shape, workload_padding, strides, relu in bias_add:
-        mod, params, shape_dict, dtype = generate_model_bias_add(args.dtype, input_shape, filter_shape, workload_padding, strides, relu)
+        mod, params, shape_dict = generate_model_bias_add(input_shape, filter_shape, workload_padding, strides, relu)
         input_dict = {}
         for k, v in shape_dict.items():
             img = np.random.rand(*v).astype(dtype)
