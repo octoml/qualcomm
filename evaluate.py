@@ -1467,7 +1467,7 @@ class Executor(object):
     ):
         from tvm.runtime.vm import VirtualMachine
         from tvm.runtime import profiler_vm
-        
+
         if self.use_tracker and self.remote == None:
             self._connect_tracker()
 
@@ -1497,9 +1497,9 @@ class Executor(object):
             print("Using local runtime")
             ctx = tvm.device(target, 0)
             rlib = vmc
-        
+
         vm = VirtualMachine(rlib, ctx, "naive")
-        
+
         inputs = []
         if isinstance(validator, Validator):
             inputs = validator.GetInputDictionary()
@@ -1515,9 +1515,9 @@ class Executor(object):
         else:
             data = tvm.nd.array(np.random.normal(size=input_shape).astype("float32"), ctx)
             vm.set_input("main", data)
-        
+
         print("Evaluating...", flush=True)
-        
+
         number = 1
         repeat = 100
         min_repeat_ms = 0
@@ -1571,7 +1571,6 @@ class Executor(object):
                     dtype=dtype,
                     validator=validator
                 )
-        
 
         benchmark_index = len(self.benchmarks)
         self.benchmarks.append(bench)
