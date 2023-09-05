@@ -325,7 +325,7 @@ def build_model_ge(mod, params):
             mod, target_host=args.target_host, target=args.target, params=params
         )
     if "android" in args.rpc_key:
-        lib.export_library(lib_path, ndk.create_shared)
+        lib.export_library(lib_path, fcompile=ndk.create_shared)
     else:
         lib.export_library(lib_path)
     return lib, lib_path, graph, params
@@ -340,7 +340,7 @@ def build_model_vm(mod, params):
     with tvm.transform.PassContext(opt_level=3):
         vmc = relay.vm.compile(vm_mod, target=args.target, target_host=args.target_host, params=params)
         if "android" in args.rpc_key:
-            vmc.mod.export_library(lib_path, ndk.create_shared)
+            vmc.mod.export_library(lib_path, fcompile=ndk.create_shared)
         else:
             vmc.mod.export_library(lib_path)
 
