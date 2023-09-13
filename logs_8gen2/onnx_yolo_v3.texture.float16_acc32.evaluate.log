@@ -1,3 +1,96 @@
-Tuning kernels
-Task:  Task(func_name=conv2d_nchwc.image2d, args=(('TENSOR', (1, 3, 416, 416), 'float16'), ('TENSOR', (32, 3, 3, 3), 'float16'), (1, 1), (1, 1, 1, 1), (1, 1), 'float32'), kwargs={}, workload=('conv2d_nchwc.image2d', ('TENSOR', (1, 3, 416, 416), 'float16'), ('TENSOR', (32, 3, 3, 3), 'float16'), (1, 1), (1, 1, 1, 1), (1, 1), 'float32'))
-[Task  1/ 2]  Current/Best:    0.00/   0.00 GFLOPS | Progress: (0/333) | 0.00 s[Task  1/ 2]  Current/Best:  344.03/ 368.23 GFLOPS | Progress: (24/333) | 100.52 s[Task  1/ 2]  Current/Best:  151.02/ 368.23 GFLOPS | Progress: (48/333) | 203.29 s[Task  1/ 2]  Current/Best:    4.54/ 417.26 GFLOPS | Progress: (72/333) | 323.14 s[Task  1/ 2]  Current/Best:  383.57/ 417.26 GFLOPS | Progress: (96/333) | 363.06 s[Task  1/ 2]  Current/Best:  314.42/ 431.96 GFLOPS | Progress: (120/333) | 401.71 s[Task  1/ 2]  Current/Best:  243.21/ 431.96 GFLOPS | Progress: (144/333) | 481.59 s[Task  1/ 2]  Current/Best:  326.14/ 431.96 GFLOPS | Progress: (168/333) | 516.26 s[Task  1/ 2]  Current/Best:  430.66/ 452.40 GFLOPS | Progress: (192/333) | 562.34 s[Task  1/ 2]  Current/Best:  409.59/ 452.40 GFLOPS | Progress: (216/333) | 599.65 s
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+2.2803072
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+5.95693824
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+1.01211648
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+4.38748928
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+5.343782400000001
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+0.59436288
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+4.4182374399999995
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+3.1551718400000004
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+3.6336972800000003
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+2.1153433600000002
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+3.3320601600000006
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+0.4054988800000001
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+1.6462592
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+5.46303488
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+0.41688063999999997
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+1.9278208
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+0.15904768
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+0.5642086399999999
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+0.16637440000000003
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+0.6560716799999999
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+4.198663680000001
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+1.39017728
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+0.3650508800000001
+Tracker attempting connection on 100.99.221.88:9155
+Tracker connected to remote RPC server
+Using Android OpenCL runtime over RPC
+8.232962559999999
