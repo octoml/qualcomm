@@ -143,7 +143,7 @@ def onnx_ssd_resnet34_layers():
         ((1, 15130, 81), (1, 80, 15130), 200, 0.5, 0.05)
     ]
     return batch_norm, bias_add, nms
-    
+
 def onnx_yolo_v3_layers():
     batch_norm = [
         ((1, 3, 416, 416), (32, 3, 3, 3), (1, 1, 1, 1), (1, 1), 1),
@@ -178,11 +178,11 @@ def onnx_yolo_v3_layers():
         ((1, 10647, 4), (1, 80, 10647), 20, 0.5, 0.6)
     ]
     return batch_norm, bias_add, nms
-    
+
 def onnx_faster_rcnn_layers():
     batch_norm = [
         ((1, 3, 1200, 1200), (64, 3, 7, 7), (3, 3, 3, 3), (2, 2), 1),
-        
+
     ]
     bias_add = [
         ((1, 3, 800, 800), (64, 3, 7, 7), (3, 3, 3, 3), (2, 2), 1),
@@ -228,9 +228,9 @@ def onnx_faster_rcnn_layers():
         ((1, 507, 4), (1, 1, 507), 2000, 0.7, 0)
     ]
     return batch_norm, bias_add, nms
-    
+
 def generate_model_bn(dtype, input_shape, filter_shape, padding, strides, relu, leaky=False):
-    dtype = "float32"
+    dtype_init = "float32" if dtype == "float32" else "float16"
     shape_dict = {
         "input": input_shape,
         "weight": filter_shape,
@@ -239,17 +239,17 @@ def generate_model_bn(dtype, input_shape, filter_shape, padding, strides, relu, 
         "bn_mean0": (filter_shape[0],),
         "bn_var0": (filter_shape[0],),
     }
-    input = tvm.relay.var("input", shape=input_shape, dtype=dtype)
-    weight = tvm.relay.var("weight", shape=filter_shape, dtype=dtype)
-    bn_gamma0 = tvm.relay.var("bn_gamma0", relay.TensorType((filter_shape[0],), dtype))
-    bn_beta0 = tvm.relay.var("bn_beta0", relay.TensorType((filter_shape[0],), dtype))
-    bn_mmean0 = tvm.relay.var("bn_mean0", relay.TensorType((filter_shape[0],), dtype))
-    bn_mvar0 = tvm.relay.var("bn_var0", relay.TensorType((filter_shape[0],), dtype))
+    input = tvm.relay.var("input", shape=input_shape, dtype=dtype_init)
+    weight = tvm.relay.var("weight", shape=filter_shape, dtype=dtype_init)
+    bn_gamma0 = tvm.relay.var("bn_gamma0", relay.TensorType((filter_shape[0],), dtype_init))
+    bn_beta0 = tvm.relay.var("bn_beta0", relay.TensorType((filter_shape[0],), dtype_init))
+    bn_mmean0 = tvm.relay.var("bn_mean0", relay.TensorType((filter_shape[0],), dtype_init))
+    bn_mvar0 = tvm.relay.var("bn_var0", relay.TensorType((filter_shape[0],), dtype_init))
 
     channels = filter_shape[0]
     kernel_size = (filter_shape[2], filter_shape[3],)
-    
-    
+
+
     D = relay.nn.conv2d(input, weight, padding=padding, strides=strides, channels=channels, kernel_size=kernel_size)
     D = relay.op.nn.batch_norm(D, bn_gamma0, bn_beta0, bn_mmean0, bn_mvar0)
     D2 = D[0]
@@ -258,27 +258,26 @@ def generate_model_bn(dtype, input_shape, filter_shape, padding, strides, relu, 
         if leaky:
             D2 = relay.op.nn.leaky_relu(data=D2)
     mod = relay.Function([input, weight, bn_gamma0,  bn_beta0, bn_mmean0, bn_mvar0], D2)
-        
+
     params = {
-        "weight": tvm.nd.array(np.random.uniform(-128, 127, filter_shape).astype(dtype)),
+        "weight": tvm.nd.array(np.random.uniform(-128, 127, filter_shape).astype(dtype_init)),
     }
     module = tvm.IRModule({})
     module["main"] = mod
-    module = convert_to_dtype(module["main"], args.dtype)
-    dtype = "float32" if args.dtype == "float32" else "float16"
-    return module, params, shape_dict, dtype
+    module = convert_to_dtype(module["main"], dtype)
+    return module, params, shape_dict, dtype_init
 
 def generate_model_bias_add(dtype, input_shape, filter_shape, padding, strides, relu):
-    dtype = "float32"
+    dtype_init = "float32" if dtype == "float32" else "float16"
     bias_shape = (filter_shape[0],)
     shape_dict = {
         "input": input_shape,
         "weight": filter_shape,
         "bias": bias_shape,
     }
-    input = tvm.relay.var("input", shape=input_shape, dtype=dtype)
-    weight = tvm.relay.var("weight", shape=filter_shape, dtype=dtype)
-    bias = relay.var("bias", shape=bias_shape, dtype=dtype)
+    input = tvm.relay.var("input", shape=input_shape, dtype=dtype_init)
+    weight = tvm.relay.var("weight", shape=filter_shape, dtype=dtype_init)
+    bias = relay.var("bias", shape=bias_shape, dtype=dtype_init)
     channels = filter_shape[0]
     kernel_size = (filter_shape[2], filter_shape[3],)
     D = relay.nn.conv2d(input, weight, padding=padding, strides=strides, channels=channels, kernel_size=kernel_size)
@@ -287,14 +286,13 @@ def generate_model_bias_add(dtype, input_shape, filter_shape, padding, strides, 
         D = relay.op.nn.relu(D)
     mod = relay.Function([input, weight, bias], D)
     params = {
-        "weight": tvm.nd.array(np.random.uniform(-128, 127, filter_shape).astype(dtype)),
-        "bias": tvm.nd.array(np.random.uniform(-128, 127, bias_shape).astype(dtype)),
+        "weight": tvm.nd.array(np.random.uniform(-128, 127, filter_shape).astype(dtype_init)),
+        "bias": tvm.nd.array(np.random.uniform(-128, 127, bias_shape).astype(dtype_init)),
     }
     module = tvm.IRModule({})
     module["main"] = mod
-    module = convert_to_dtype(module["main"], args.dtype)
-    dtype = "float32" if args.dtype == "float32" else "float16"
-    return module, params, shape_dict, dtype
+    module = convert_to_dtype(module["main"], dtype)
+    return module, params, shape_dict, dtype_init
 
 def generate_model_nms(boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold):
     shape_dict = {
@@ -359,26 +357,21 @@ def run_module(remote, lib_path, input_dict, lib, graph=None, params={}):
         from tvm.contrib.debugger import debug_runtime as graph_executor
     else:
         from tvm.contrib import graph_executor
-    
+
     rlib = lib
-    if remote:
-        print("Using Android OpenCL runtime over RPC")
-        if "opencl" in args.target:
-            dev = remote.cl(0)
-        else:
-            dev = remote.cpu(0)
-        remote.upload(lib_path)
-        rlib = remote.load_module(lib_path)
+    if "opencl" in args.target:
+        dev = remote.cl(0)
     else:
-        print("Using local runtime")
-        dev = tvm.device(args.target, 0)
-    
+        dev = remote.cpu(0)
+    remote.upload(lib_path)
+    rlib = remote.load_module(lib_path)
+
     number = 1
     repeat = args.repeat
     min_repeat_ms = 0
     time_to_work_ms = 1000
     cooldown_interval_ms=1000
-    
+
     if args.VM:
         if args.debug:
             vm = tvm.runtime.profiler_vm.VirtualMachineProfiler(rlib, dev, "naive")
@@ -402,14 +395,15 @@ def run_module(remote, lib_path, input_dict, lib, graph=None, params={}):
             m.run()
         time_f = advanced_time_evaluator(m, "run", dev, number, repeat, min_repeat_ms, time_to_work_ms, cooldown_interval_ms)
         benchmarkResult = time_f()
-    
+
     if benchmarkResult:
         cost = benchmarkResult.mean
         cost_ms = cost * 1000
-        print(f'{cost_ms}', flush=True)
     else:
         print("VM executor could not be additionally benchmarked with --debug flag. (ZeroDivisionError: float division by zero in 'advanced_time_evaluator'.)")
-    
+        cost_ms = 0
+    return cost_ms
+
 
 def tune_tasks(
     tasks,
@@ -497,69 +491,76 @@ def connect_tracker():
     )
     print("Tracker connected to remote RPC server")
     return remote
-    
+
 def tune_model(batch_norm, bias_add, nms):
     for input_shape, filter_shape, workload_padding, strides, relu in batch_norm:
         mod, params, input_shape, _ = generate_model_bn(args.dtype, input_shape, filter_shape, workload_padding, strides, relu)
         tune(mod, params)
-    
+
     for input_shape, filter_shape, workload_padding, strides, relu in bias_add:
         mod, params, input_shape, _ = generate_model_bias_add(args.dtype, input_shape, filter_shape, workload_padding, strides, relu)
         tune(mod, params)
-    
+
     for boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold in nms:
         mod, params, input_shape = generate_model_nms(boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold)
         tune(mod, params)
-    
+
 def build_and_evaluate(batch_norm, bias_add, nms):
+    remote = connect_tracker()
+    total = 0
+    print("Layers with batch_norm:")
     for input_shape, filter_shape, workload_padding, strides, relu in batch_norm:
         mod, params, shape_dict, dtype = generate_model_bn(args.dtype, input_shape, filter_shape, workload_padding, strides, relu)
         input_dict = {}
         for k, v in shape_dict.items():
             img = np.random.rand(*v).astype(dtype)
             input_dict[k] = img
-        remote = connect_tracker()
         if args.VM:
             vmc, lib_path = build_model_with_stat(mod, params, args.log)
-            run_module(remote, lib_path, input_dict, vmc)
+            cost_ms = run_module(remote, lib_path, input_dict, vmc)
         else:
             lib, lib_path, graph, params = build_model_with_stat(mod, params, args.log)
-            run_module(remote, lib_path, input_dict, lib, graph, params)
-        del remote
+            cost_ms = run_module(remote, lib_path, input_dict, lib, graph, params)
+        total += cost_ms
+        print("\tinput_shape: {}, filter_shape: {}, padding: {}, strides: {}, with_relu: {}; time: {} ms".format(input_shape, filter_shape, workload_padding, strides, relu, cost_ms))
 
+    print("Layers with bias_add:")
     for input_shape, filter_shape, workload_padding, strides, relu in bias_add:
         mod, params, shape_dict, dtype = generate_model_bias_add(args.dtype, input_shape, filter_shape, workload_padding, strides, relu)
         input_dict = {}
         for k, v in shape_dict.items():
             img = np.random.rand(*v).astype(dtype)
             input_dict[k] = img
-        remote = connect_tracker()
         if args.VM:
             vmc, lib_path = build_model_with_stat(mod, params, args.log)
-            run_module(remote, lib_path, input_dict, vmc)
+            cost_ms = run_module(remote, lib_path, input_dict, vmc)
         else:
             lib, lib_path, graph, params = build_model_with_stat(mod, params, args.log)
-            run_module(remote, lib_path, input_dict, lib, graph, params)
-        del remote
+            cost_ms = run_module(remote, lib_path, input_dict, lib, graph, params)
+        total += cost_ms
+        print("\tinput_shape: {}, filter_shape: {}, padding: {}, strides: {}, with_relu: {}; time: {} ms".format(input_shape, filter_shape, workload_padding, strides, relu, cost_ms))
 
+    print("Layers with nms:")
     for boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold in nms:
         mod, params, shape_dict = generate_model_nms(boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold)
         input_dict = {}
         for k, v in shape_dict.items():
             img = np.random.rand(*v).astype("float32")
             input_dict[k] = img
-        remote = connect_tracker()
         try:
             if args.VM:
                 vmc, lib_path = build_model_with_stat(mod, params, args.log)
-                run_module(remote, lib_path, input_dict, vmc)
+                cost_ms = run_module(remote, lib_path, input_dict, vmc)
             else:
                 lib, lib_path, graph, params = build_model_with_stat(mod, params, args.log)
-                run_module(remote, lib_path, input_dict, lib, graph, params)
+                cost_ms = run_module(remote, lib_path, input_dict, lib, graph, params)
+            total += cost_ms
+            print("\tboxes_shape: {}, scores_shape: {}, max_output_boxes_per_class: {}, iou_threshold: {}, score_threshold: {}; time: {} ms".format(boxes_shape, scores_shape, max_output_boxes_per_class, iou_threshold, score_threshold, cost_ms))
         except RuntimeError as RE:
             print("Following error occured:", RE)
             continue
-        del remote
+
+    print("Total time: {} ms.".format(total))
 
 
 def run_full():
@@ -574,7 +575,7 @@ def run_full():
     if args.tune:
         tune_model(batch_norm, bias_add, nms)
     build_and_evaluate(batch_norm, bias_add, nms)
-    
+
 
 if __name__ == "__main__":
     run_full()
