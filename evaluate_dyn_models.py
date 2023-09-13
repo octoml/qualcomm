@@ -233,11 +233,6 @@ def generate_model_bn(dtype, input_shape, filter_shape, padding, strides, relu, 
     dtype_init = "float32" if dtype == "float32" else "float16"
     shape_dict = {
         "input": input_shape,
-        "weight": filter_shape,
-        "bn_gamma0": (filter_shape[0],),
-        "bn_beta0": (filter_shape[0],),
-        "bn_mean0": (filter_shape[0],),
-        "bn_var0": (filter_shape[0],),
     }
     input = tvm.relay.var("input", shape=input_shape, dtype=dtype_init)
     weight = tvm.relay.var("weight", shape=filter_shape, dtype=dtype_init)
@@ -261,6 +256,10 @@ def generate_model_bn(dtype, input_shape, filter_shape, padding, strides, relu, 
 
     params = {
         "weight": tvm.nd.array(np.random.uniform(-128, 127, filter_shape).astype(dtype_init)),
+        "bn_gamma0": tvm.nd.array(np.random.uniform(-128, 127, (filter_shape[0],)).astype(dtype_init)),
+        "bn_beta0": tvm.nd.array(np.random.uniform(-128, 127, (filter_shape[0],)).astype(dtype_init)),
+        "bn_mean0": tvm.nd.array(np.random.uniform(-128, 127, (filter_shape[0],)).astype(dtype_init)),
+        "bn_var0": tvm.nd.array(np.random.uniform(-128, 127, (filter_shape[0],)).astype(dtype_init)),
     }
     module = tvm.IRModule({})
     module["main"] = mod
