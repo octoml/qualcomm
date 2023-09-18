@@ -1398,7 +1398,7 @@ class Executor(object):
                 ctx = self.remote.cl(0)
             else:
                 ctx = self.remote.cpu(0)
-            lib.export_library(dso_binary_path, ndk.create_shared)
+            lib.export_library(dso_binary_path, fcompile=ndk.create_shared)
             remote_path = "/data/local/tmp/" + dso_binary
             self.remote.upload(dso_binary_path)
             print("Uploading binary...")
@@ -1489,7 +1489,7 @@ class Executor(object):
                 ctx = self.remote.cl(0)
             else:
                 ctx = self.remote.cpu(0)
-            vmc.mod.export_library(dso_binary_path, ndk.create_shared)
+            vmc.mod.export_library(dso_binary_path, fcompile=ndk.create_shared)
             self.remote.upload(dso_binary_path)
             print("Uploading binary...")
             rlib = self.remote.load_module(dso_binary)
