@@ -1572,6 +1572,7 @@ class Executor(object):
                     validator=validator
                 )
 
+
         benchmark_index = len(self.benchmarks)
         self.benchmarks.append(bench)
 
