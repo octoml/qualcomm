@@ -1,4 +1,0 @@
-Extracting tasks
-Tuning kernels
-Task:  Task(func_name=conv2d_nhwc.image2d, args=(('TENSOR', (1, 65, 65, 256), 'float16'), ('TENSOR', (1, 1, 256, 21), 'float16'), (1, 1), (0, 0, 0, 0), (1, 1), 'float32'), kwargs={}, workload=('conv2d_nhwc.image2d', ('TENSOR', (1, 65, 65, 256), 'float16'), ('TENSOR', (1, 1, 256, 21), 'float16'), (1, 1), (0, 0, 0, 0), (1, 1), 'float32'))
-[Task  1/31]  Current/Best:    0.00/   0.00 GFLOPS | Progress: (0/333) | 0.00 s[Task  1/31]  Current/Best:    1.43/ 155.56 GFLOPS | Progress: (24/333) | 139310.44 s
